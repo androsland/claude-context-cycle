@@ -1,0 +1,7 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+
+# installer backups / local state
+*.bak

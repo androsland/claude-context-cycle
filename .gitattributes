@@ -1,0 +1,6 @@
+# Keep LF endings in the repo everywhere — these scripts run under bash/node on
+# macOS, Linux, and Windows (Git Bash). CRLF would break the shebang lines.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.md   text eol=lf
