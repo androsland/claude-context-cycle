@@ -29,7 +29,8 @@ clears, and injects the snapshot back into the new session automatically.
       │
       ▼
   fresh session          ← SessionStart hook injects the checkpoint automatically
-   "Restored working context…"   you pick up exactly where you left off
+   "✓ Restored context via /context-cycle"   ← visible confirmation, then you
+                                                pick up exactly where you left off
 ```
 
 One manual keystroke (`/clear`); everything else is automatic.
@@ -90,7 +91,10 @@ where `/context-restore` and `/context-save list` can find them too.
   exists — so a **plain `/clear` never restores anything**.
 - **SessionStart hook.** After a `/clear`, Claude Code fires a `SessionStart` hook
   with `source: "clear"`. The hook checks the flag and, if valid, injects the saved
-  checkpoint as context (the "restore"), then deletes the flag.
+  checkpoint as context (the "restore"), then deletes the flag. The injected context
+  is model-only (not a visible chat message), so the restore also instructs the model
+  to open its next reply with a visible `✓ Restored context via /context-cycle` line —
+  otherwise a successful restore looks like "nothing happened."
 - **One-shot.** Fires once, then disarms.
 - **Project-scoped.** The flag records the repo root it was armed in. A `/clear` in
   a *different* project is ignored and **leaves the flag armed** for the right one.

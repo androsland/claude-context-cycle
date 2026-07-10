@@ -96,6 +96,10 @@ const header =
   'context window. Below is the saved working state — resume from the "Remaining ' +
   'Work" section and do not repeat work already marked done.\n' +
   (armed.branch ? `Saved on branch: ${armed.branch}\n` : '') +
+  '\n**Before doing anything else, begin your very next reply with this exact ' +
+  'visible confirmation line (so the user can see the silent restore succeeded):**\n' +
+  '`✓ Restored context via /context-cycle' +
+  (armed.branch ? ` (branch: ${armed.branch})` : '') + '`\n' +
   '\n---\n\n';
 
 process.stdout.write(JSON.stringify({

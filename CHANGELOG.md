@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.1 — 2026-07-10
+
+- Restore now emits a **visible confirmation line**. The `SessionStart` injection is
+  model-only context, so a successful restore previously left no on-screen sign and
+  looked like "nothing happened." The hook now instructs the model to open its next
+  reply with `✓ Restored context via /context-cycle (branch: …)`, making the silent
+  restore visible.
+
 ## v1.0.0
 
 Initial release.
