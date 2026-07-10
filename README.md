@@ -29,8 +29,8 @@ clears, and injects the snapshot back into the new session automatically.
       │
       ▼
   fresh session          ← SessionStart hook injects the checkpoint automatically
-   "✓ Restored context via /context-cycle"   ← visible confirmation, then you
-                                                pick up exactly where you left off
+   ✓ Restored: "auth refactor" · next: wire up token rotation   ← clear-time banner
+   …then the session opens with a short recap and resumes where you left off
 ```
 
 One manual keystroke (`/clear`); everything else is automatic.
@@ -91,10 +91,18 @@ where `/context-restore` and `/context-save list` can find them too.
   exists — so a **plain `/clear` never restores anything**.
 - **SessionStart hook.** After a `/clear`, Claude Code fires a `SessionStart` hook
   with `source: "clear"`. The hook checks the flag and, if valid, injects the saved
-  checkpoint as context (the "restore"), then deletes the flag. The injected context
-  is model-only (not a visible chat message), so the restore also instructs the model
-  to open its next reply with a visible `✓ Restored context via /context-cycle` line —
-  otherwise a successful restore looks like "nothing happened."
+  checkpoint, then deletes the flag. It uses **two output channels**, because `/clear`
+  does not invoke the model:
+  - `hookSpecificOutput.additionalContext` — the full checkpoint, injected into the
+    **model's** context (invisible to you). This *is* the restore. It also asks the
+    session to open its first reply with a short recap.
+  - a top-level **`systemMessage`** — rendered **to you at clear-time**, enriched from
+    the checkpoint (`✓ Restored: "<title>" · next: <first remaining-work item>`), so
+    you see what came back the instant you clear, not on your next message.
+
+  The output is written with synchronous `writeSync(1, …)`: `process.stdout.write`
+  followed by `process.exit()` can truncate a multi-KB checkpoint on the pipe and
+  silently drop the whole restore.
 - **One-shot.** Fires once, then disarms.
 - **Project-scoped.** The flag records the repo root it was armed in. A `/clear` in
   a *different* project is ignored and **leaves the flag armed** for the right one.
