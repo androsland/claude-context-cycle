@@ -60,10 +60,6 @@ TITLE_SLUG="${TITLE_SLUG:-context-cycle}"
 FILE="$CHECKPOINT_DIR/${TIMESTAMP}-${TITLE_SLUG}.md"
 [ -e "$FILE" ] && FILE="$CHECKPOINT_DIR/${TIMESTAMP}-${TITLE_SLUG}-$(printf '%04x' "$$").md"
 
-# Stash the path for arm.sh (Step 3) so no path has to round-trip through the model.
-mkdir -p "$CLAUDE_DIR/context-cycle"
-printf '%s\n' "$FILE" > "$CLAUDE_DIR/context-cycle/.pending-file"
-
 echo "FILE=$FILE"
 echo "BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 echo "ISO=$(date +%Y-%m-%dT%H:%M:%S%z)"
@@ -109,13 +105,28 @@ fresh session will see, so make it self-sufficient for someone with zero memory.
 
 ## Step 3 — Arm the one-shot restore
 
+Run this with `<CHECKPOINT-PATH>` replaced by the **literal absolute path** printed
+as `FILE=` in Step 1 — the same path you just wrote to in Step 2:
+
 ```bash
-bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/context-cycle/arm.sh"
+bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/context-cycle/arm.sh" "<CHECKPOINT-PATH>"
 ```
 
-This reads the path from Step 1's `.pending-file`, writes `armed.json`, and prints
-`ARMED -> <path>`. If it prints an error instead, STOP and report it — do not tell
-the user to clear.
+Worked example — if Step 1 printed
+`FILE=/home/you/.claude/context-cycle/checkpoints/myrepo/20260805-141233-auth-refactor.md`:
+
+```bash
+bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/context-cycle/arm.sh" "/home/you/.claude/context-cycle/checkpoints/myrepo/20260805-141233-auth-refactor.md"
+```
+
+**Never write `"$FILE"` (or any other variable) as the argument.** Every Claude Code
+Bash call is a fresh shell, so `$FILE` from Step 1 no longer exists here and would
+expand to an empty string. `arm.sh` refuses an empty, whitespace-only, `$`-containing,
+or relative argument rather than guessing — there is no fallback path to silently pick
+up the wrong session's checkpoint.
+
+On success it prints `ARMED -> <path>` and `ARM_FLAG -> <flag file>`. If it prints an
+error instead, STOP and report it — do not tell the user to clear.
 
 ## Step 4 — Hand off to /clear
 
@@ -142,9 +153,65 @@ Now press  /clear  — your saved context auto-restores into the fresh session.
 - **Never modify code.** Save state, write one file, arm the flag. Nothing else.
 - **You cannot run `/clear` for the user** — no skill or hook can. Always hand off.
 - **One-shot, fresh, same-project.** The hook fires once, only on a `/clear`, only
-  within an hour of arming, and only in the project you armed it in, then disarms.
-  A `/clear` in a different project leaves the flag armed for the right one; any
-  other `/clear` is a silent no-op.
+  within an hour of arming, and only in the project you armed it in, then disarms
+  that one arm. A `/clear` in a different project leaves the flag armed for the
+  right one; any other `/clear` is a silent no-op.
+- **Concurrency-safe by construction.** The checkpoint path goes straight from
+  Step 1 to `arm.sh` as an argument, and each arm is its own file keyed by
+  (project, session) under `context-cycle/armed.d/`. Nothing about one session's
+  cycle is reachable — or overwritable — by another session's.
 - **Checkpoints are append-only.** Each cycle writes a new file; nothing is
-  overwritten or deleted.
+  overwritten or deleted. The hook deletes arm flags only, never a checkpoint.
 - If `arm.sh` fails, the restore is NOT armed — say so and don't prompt for `/clear`.
+
+---
+
+## Non-goals and known limits
+
+Scope statements, not caveats: an unstated limit reads as a claim of coverage.
+
+**Must keep working — do not "simplify" these away:**
+
+- The plain single-session cycle: `/context-cycle` → `/clear` right after → restore
+  fires. This is the overwhelmingly common path and everything else is subordinate
+  to it.
+- **Re-arming within one session.** Running `/context-cycle` twice before clearing
+  supersedes that session's own earlier arm, so the newest checkpoint is the one
+  restored and no stale flag is left behind.
+- A `/clear` with nothing armed stays a silent no-op, and a `/clear` in project X
+  never consumes an arm belonging to project Y.
+- Non-git directories, gstack's checkpoint directory, a session whose Bash calls
+  `cd`'d elsewhere in the repo, and a session started in a subdirectory of the repo
+  all still arm and restore.
+- The Windows/MSYS path conversions in `arm.sh` (`cygpath -m`, the `/c/` → `C:/`
+  fallback) and in the hook (`norm()`, the `win32` branch) are load-bearing on
+  native Windows and are not exercised by WSL testing. Leave them intact.
+
+**Known blind spots — the design structurally cannot see these:**
+
+- **Two sessions in the same project that clear out of arming order.** `/clear`
+  mints a brand-new session id, and the SessionStart payload carries no link back
+  to the pre-clear session (verified against Claude Code 2.1.222: the payload is
+  `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `source`, and
+  `session_id` differs on either side of the clear). The hook therefore cannot tell
+  *which* session is clearing. It hands out the oldest pending arm for the project:
+  correct when sessions clear in the order they armed, mis-paired when they don't.
+  Nothing is lost either way — every checkpoint file is still on disk and each
+  session's arm is a separate file — and the clear-time banner names the checkpoint
+  that was restored, so a mis-pair is visible rather than silent.
+- **An abandoned arm inside the TTL window.** If a session arms and never clears,
+  the next `/clear` in that same project within the hour consumes that arm. There
+  is no signal distinguishing "the session that armed this" from "some other
+  session in the same project".
+- **A subdirectory *inside* a nested repo.** The scope gate looks for `.git` in the
+  clearing session's own cwd, so a `/clear` at a nested repo's root is correctly
+  rejected at any depth (`repo/a/b/nested` does not match an arm taken at `repo`).
+  But it only inspects that one directory, never the path between — so a `/clear` at
+  `repo/a/b/nested/src` still matches `repo`'s arm, because `src` itself holds no
+  `.git`. Walking up to the nearest repo boundary would close it, at the cost of a
+  stat per ancestor on every session start.
+- **A Claude Code version that stops sending `source` on SessionStart.** The hook
+  requires `source === 'clear'` and fails closed, so the restore would stop firing
+  entirely rather than fire on unrelated session starts. That is deliberate: the
+  loud failure is recoverable, a blind fire consumes the arm and injects stale
+  context into a session that never asked for it.

@@ -2,28 +2,41 @@
 // SessionStart hook for the /context-cycle skill.
 //
 // Fires only when ALL of these hold:
-//   (a) the session started from a real /clear (best-effort check),
+//   (a) the payload says source === 'clear' (strict — see "fails closed" below),
 //   (b) an "armed" flag written by /context-cycle exists and is fresh (< TTL),
-//   (c) the current project matches the one the flag was armed in.
+//   (c) the current project matches the one that flag was armed in.
 // On fire: show the user a clear-time confirmation (systemMessage) AND inject the
 // saved checkpoint into the model's context (additionalContext) — that injection
-// IS the restore — then delete the flag (strictly one-shot).
+// IS the restore — then delete THAT ONE flag (strictly one-shot).
 //
-// A /clear in a DIFFERENT project leaves the flag intact for the project it
-// belongs to. An un-armed /clear, or any non-clear session start, is a silent
-// no-op. This is why a generic /clear never restores anything.
+// Concurrency: arms live one file per (project, session) under context-cycle/
+// armed.d/, so two sessions cycling at the same time cannot overwrite each
+// other's pending restore. This hook consumes the OLDEST fresh arm matching the
+// cleared project and leaves the rest armed. A pre-existing single-slot
+// context-cycle/armed.json (the older layout) is still read and consumed, so a
+// cycle armed by the old arm.sh completes instead of stranding.
+//
+// Fails closed: /clear mints a brand-new session id and the payload carries no
+// link to the pre-clear session, so 'source' is the only evidence that a clear
+// actually happened. A missing or unreadable payload therefore does NOT fire —
+// firing blind would consume an arm on an unrelated session start and inject a
+// checkpoint nobody asked for.
+//
+// Only arm flags are ever deleted here. Checkpoint files are append-only: this
+// hook never writes, moves, or removes one.
 
-import { readFileSync, existsSync, unlinkSync, writeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const TTL_SECONDS = 3600; // a flag older than this is stale -> ignored + cleared
 
 const claudeDir = (process.env.CLAUDE_CONFIG_DIR || '').trim() || join(homedir(), '.claude');
-const armedPath = join(claudeDir, 'context-cycle', 'armed.json');
+const stateDir = join(claudeDir, 'context-cycle');
+const armDir = join(stateDir, 'armed.d');
+const legacyArmedPath = join(stateDir, 'armed.json');
 
 function noop() { process.exit(0); }                 // no stdout => nothing injected
-function disarm() { try { unlinkSync(armedPath); } catch { /* ignore */ } }
 
 // Normalize a path for cross-tool comparison: backslashes -> '/', MSYS /c/ -> c:/,
 // drop trailing slash, lowercase (Windows filesystem is case-insensitive).
@@ -60,52 +73,124 @@ function parseCheckpoint(md) {
   return { title, nextStep };
 }
 
-// Read the hook payload (source + cwd). If stdin can't be read we degrade
-// gracefully: the armed-flag + TTL still gate, and the scope check is skipped.
+// Every arm-flag file on disk: the per-(project, session) files plus a legacy
+// single-slot armed.json if one is still lying around.
+function armPaths() {
+  const out = [];
+  if (existsSync(legacyArmedPath)) out.push(legacyArmedPath);
+  try {
+    for (const name of readdirSync(armDir)) {
+      if (name.endsWith('.json') && !name.startsWith('.tmp.')) out.push(join(armDir, name));
+    }
+  } catch { /* armed.d may not exist yet */ }
+  return out;
+}
+
+function readArm(p) {
+  try {
+    const o = JSON.parse(readFileSync(p, 'utf8'));
+    if (o && typeof o === 'object') return o;
+  } catch { /* unreadable, malformed, or mid-write */ }
+  return null;
+}
+
+function isFresh(arm, now) {
+  if (!arm || typeof arm.armed_at !== 'number') return false;
+  const age = now - arm.armed_at;
+  return age <= TTL_SECONDS && age > -TTL_SECONDS;         // future stamps = junk
+}
+
+function drop(p) { try { unlinkSync(p); } catch { /* ignore */ } }
+
+// Reap expired arms on every session start, so armed.d cannot grow without bound
+// on a machine where cycles get armed and abandoned. Never touches checkpoints.
+function sweep(now) {
+  for (const p of armPaths()) {
+    const arm = readArm(p);
+    if (arm === null) {
+      // Unparseable. Could be a concurrent arm.sh mid-write, so only reap it once
+      // it is older than the TTL — a live arm must never be destroyed.
+      try { if (now - statSync(p).mtimeMs / 1000 > TTL_SECONDS) drop(p); } catch { /* ignore */ }
+      continue;
+    }
+    if (!isFresh(arm, now)) drop(p);
+  }
+  try {
+    for (const name of readdirSync(armDir)) {
+      if (!name.startsWith('.tmp.')) continue;
+      const p = join(armDir, name);
+      try { if (now - statSync(p).mtimeMs / 1000 > TTL_SECONDS) drop(p); } catch { /* ignore */ }
+    }
+  } catch { /* armed.d may not exist yet */ }
+}
+
+// Project scope: only restore in the project the flag was armed in.
+//   - exact match wins outright;
+//   - a cwd BELOW the armed root still matches (the session may have been started
+//     in a subdirectory, or the arming Bash call may have cd'd elsewhere in the
+//     repo) — but not when that subdirectory is itself a repo boundary, which is
+//     how a nested repo or submodule in a monorepo gets correctly rejected;
+//   - an arm with no recorded cwd (hand-written / very old) is unscoped;
+//   - an unknown current cwd fails closed and leaves the arm alone.
+function scopeAllows(armedCwd, curCwdRaw) {
+  const a = norm(armedCwd);
+  if (!a) return true;
+  const c = norm(curCwdRaw);
+  if (!c) return false;
+  if (a === c) return true;
+  if (!c.startsWith(a + '/')) return false;
+  try { return !existsSync(join(String(curCwdRaw), '.git')); } catch { return true; }
+}
+
+// MSYS /c/... -> C:/... for native Windows node.
+function winPath(cp) {
+  if (process.platform !== 'win32' || typeof cp !== 'string') return cp;
+  const m = /^\/([a-zA-Z])\/(.*)$/.exec(cp);
+  return m ? m[1].toUpperCase() + ':/' + m[2] : cp;
+}
+
+// Read the hook payload (source + cwd).
 let payload = {};
 try {
   const raw = readFileSync(0, 'utf8');
   if (raw && raw.trim()) payload = JSON.parse(raw);
 } catch { /* ignore */ }
 
-if (payload.source && payload.source !== 'clear') noop();  // non-clear: never consume
-if (!existsSync(armedPath)) noop();
-
-let armed;
-try {
-  armed = JSON.parse(readFileSync(armedPath, 'utf8'));
-} catch {
-  disarm();
-  noop();
-}
-
 const now = Math.floor(Date.now() / 1000);
-if (!armed || typeof armed.armed_at !== 'number' || now - armed.armed_at > TTL_SECONDS) {
-  disarm();                                          // stale -> clear it
-  noop();
+try { sweep(now); } catch { /* a sweep failure must never break session start */ }
+
+if (payload.source !== 'clear') noop();   // non-clear, or no evidence of one
+
+// Candidate arms: fresh, and armed in this project.
+const candidates = [];
+for (const p of armPaths()) {
+  const arm = readArm(p);
+  if (!isFresh(arm, now)) continue;
+  if (!scopeAllows(arm.cwd, payload.cwd)) continue;        // wrong project -> leave armed
+  candidates.push({ path: p, arm });
 }
+if (!candidates.length) noop();
 
-// Project scope: only restore in the project the flag was armed in. If the
-// current cwd is unknown (stdin unreadable), skip the check rather than break.
-const curCwd = norm(payload.cwd);
-const armedCwd = norm(armed.cwd);
-if (armedCwd && curCwd && curCwd !== armedCwd && !curCwd.startsWith(armedCwd + '/')) {
-  noop();                                            // wrong project -> leave it armed
+// Oldest first: when two sessions in one project clear in the order they armed,
+// each gets its own checkpoint back. (Out-of-order clears can still mis-pair —
+// nothing in the payload says which session is clearing. See SKILL.md.)
+candidates.sort((x, y) => x.arm.armed_at - y.arm.armed_at || x.path.localeCompare(y.path));
+
+let chosen = null;
+for (const c of candidates) {
+  const cp = winPath(c.arm.checkpoint);
+  let body = '';
+  try { if (cp && existsSync(cp)) body = readFileSync(cp, 'utf8'); } catch { /* ignore */ }
+  if (body.trim()) { chosen = { path: c.path, arm: c.arm, cp, body }; break; }
+  drop(c.path);            // checkpoint gone: the flag is dead. The file is not.
 }
+if (!chosen) noop();
 
-// Passed every gate: this is the restore. Consume, then inject.
-disarm();
+// Passed every gate: this is the restore. Consume this one arm, then inject.
+drop(chosen.path);
 
-let cp = armed.checkpoint;
-if (process.platform === 'win32' && typeof cp === 'string') {
-  const m = /^\/([a-zA-Z])\/(.*)$/.exec(cp);         // /c/... -> C:/...
-  if (m) cp = m[1].toUpperCase() + ':/' + m[2];
-}
-if (!cp || !existsSync(cp)) noop();
-
-let body = '';
-try { body = readFileSync(cp, 'utf8'); } catch { noop(); }
-if (!body.trim()) noop();
+let body = chosen.body;
+const cp = chosen.cp;
 
 // Parse the title + first remaining-work item from the FULL body (before any
 // truncation below) for the clear-time banner.
@@ -121,19 +206,21 @@ if (body.length > MAX) {
 }
 
 // Clear-time confirmation banner (systemMessage). Enriched with WHAT was restored —
-// the title and the next step — so it's not just a bare "restored" receipt. Falls
-// back to the plain form when the checkpoint couldn't be parsed.
+// the title and the next step — so it's not just a bare "restored" receipt, and so
+// a mis-paired restore (two sessions, same project, out-of-order clears) is visible
+// to the user instead of silent. Falls back to the plain form when the checkpoint
+// couldn't be parsed.
 let confirmLine = '✓ Restored';
 confirmLine += title ? `: "${clamp(title, 60)}"` : ' context via /context-cycle';
 if (nextStep) confirmLine += ` · next: ${clamp(nextStep, 80)}`;
-if (armed.branch) confirmLine += title ? ` (${armed.branch})` : ` (branch: ${armed.branch})`;
+if (chosen.arm.branch) confirmLine += title ? ` (${chosen.arm.branch})` : ` (branch: ${chosen.arm.branch})`;
 
 const header =
   '## Restored working context (/context-cycle)\n' +
   'The previous conversation was saved and cleared via /context-cycle to free the ' +
   'context window. Below is the saved working state — resume from the "Remaining ' +
   'Work" section and do not repeat work already marked done.\n' +
-  (armed.branch ? `Saved on branch: ${armed.branch}\n` : '') +
+  (chosen.arm.branch ? `Saved on branch: ${chosen.arm.branch}\n` : '') +
   '\n**On your FIRST reply in this restored session, open with a 2–3 line recap** of ' +
   'what you picked up — the "Working on" title and the top 1–2 items from "Remaining ' +
   'Work" — then continue from there. Do NOT re-print the "✓ Restored" banner; the ' +
