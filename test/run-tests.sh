@@ -470,6 +470,25 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   eq "an unrelated project still does not match" "" "$(clear_in "$P19B")"
   eq "and that arm is still armed" "1" "$(arms)"
   rm -f "$ARMD"/*.json 2>/dev/null || true
+
+  # The widening the two assertions above do NOT test, and the one that matters:
+  # p19b and p19 are unrelated plain directories, so they never had any route to
+  # each other. The route canonicalization opens is a symlink INSIDE one repo that
+  # points at another. Without the raw-enclosing-repo check this restored p19's
+  # checkpoint into a session whose cwd was inside p19b — reproduced, and it is the
+  # only assertion here that fails against the un-narrowed canonicalization.
+  mkdir -p "$P19B/vendor"
+  ln -s "$P19" "$P19B/vendor/link"
+  mkcp "$C19" "TWOFORMS"
+  (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-4949 bash "$ARM" "$C19" >/dev/null 2>&1)
+  eq "a link inside another repo does not reach its arm" "" "$(clear_in "$P19B/vendor/link")"
+  eq "and that arm survives the attempt" "1" "$(arms)"
+  # ...while the same shape with no repo above the link — the macOS /var and Git Bash
+  # short-name cases, and a plain ~/dev symlink — must still restore. This is the
+  # line the check draws, so pin both sides of it.
+  eq "but a link with no repo above it still restores" \
+     '✓ Restored: "TWOFORMS" · next: finish TWOFORMS (testbr)' "$(clear_in "$ROOT/p19-link")"
+  rm -f "$ARMD"/*.json 2>/dev/null || true
 else
   skip "group 19 two-path-form scope matching" "this shell/filesystem does not create real symlinks"
 fi

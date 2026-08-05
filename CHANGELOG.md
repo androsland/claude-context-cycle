@@ -45,6 +45,12 @@ CI, and an installer that no longer eats your local edits.
   path before comparison, falling back to the raw string when a path cannot be
   resolved. Found by the new CI: every restore assertion failed on macOS and Windows
   while Linux passed, because on Linux the two forms happen to be identical.
+  Resolving paths is a widening on its own — *any* symlink on the clearing cwd would
+  alias into whatever it targets, so a link planted inside repo B and pointed at
+  project A pulled A's checkpoint into a session working in B. Narrowed by the one
+  thing that separates the two: what the raw path walked *through*. A `/var` alias, a
+  short name, or a plain symlink to a project has no repository above it; a planted
+  link does, and it isn't the repo we landed in. Both sides are pinned by tests.
 - **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
   `/c/…` → `C:/…` conversion ran unconditionally, so a checkpoint under any
   single-letter top-level directory (`/a/notes.md`) was stored as `A:/notes.md` — a

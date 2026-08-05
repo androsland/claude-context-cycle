@@ -171,12 +171,46 @@ function canon(p) {
   const s = String(p);
   try { return realpathSync(s); } catch { return s; }
 }
+
+// Canonicalizing is what makes the two path forms match, but on its own it is also a
+// widening: ANY symlink on the clearing cwd now aliases into whatever it targets. A
+// link planted inside repo B and pointed at project A pulls A's checkpoint into a
+// session nominally working in B. Reproduced against the un-narrowed version.
+//
+// At the leaf the two cases are indistinguishable — in both, the cwd resolves to a
+// project directory it is not literally named after — so no test on the cwd itself
+// separates them. What separates them is what the raw path walked THROUGH. A macOS
+// /var alias, a Git Bash short name, and a plain symlink to a project directory all
+// have no repository above them; a link inside project B does, and that repo is not
+// the one we landed in. So: when resolution actually moved the path, the repository
+// the raw path belongs to *as written* must be the one the resolved path belongs to.
+//
+// Only walks when the raw and canonical forms differ, so the common case pays
+// nothing. Known false negative, recorded in TODOS.md: a user whose $HOME is itself
+// a git repo (yadm and friends) AND who reaches the project through a symlink under
+// it trips this and silently gets no restore. Both conditions are needed; the
+// conservative direction is not restoring.
+function rawEnclosingRepo(rawPath) {
+  let p = String(rawPath).replace(/\\/g, '/').replace(/\/+$/, '');
+  for (let i = 0; i < 64; i++) {
+    const cut = p.lastIndexOf('/');
+    if (cut <= 0) return '';
+    p = p.slice(0, cut);
+    try { if (existsSync(join(p, '.git'))) return p; } catch { /* unreadable: keep walking */ }
+  }
+  return '';
+}
+
 function scopeAllows(armedCwd, curCwdRaw) {
   if (!norm(armedCwd)) return true;
   const a = norm(canon(armedCwd));
   const cRaw = canon(curCwdRaw);
   const c = norm(cRaw);
   if (!c) return false;
+  if (norm(curCwdRaw) !== c) {
+    const rawRepo = rawEnclosingRepo(curCwdRaw);
+    if (rawRepo && norm(canon(rawRepo)) !== a) return false;
+  }
   if (a === c) return true;
   if (!c.startsWith(a + '/')) return false;
   try { return !existsSync(join(cRaw, '.git')); } catch { return true; }

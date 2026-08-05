@@ -85,6 +85,20 @@
   the user per link, which is a worse trade than stating the limit.
   (security review, 2026-08-05)
 
+- **The scope check's aliasing guard has a known false negative: `$HOME` as a git
+  repo.** Canonicalizing the clearing cwd is what makes `/var` vs `/private/var` and
+  Git Bash short names match, but on its own it lets *any* symlink alias into what it
+  targets — a link inside repo B pointed at project A pulled A's checkpoint into a
+  session working in B (reproduced; now blocked, and pinned by group 19). The check
+  that separates the two is what the raw path walked *through*: a legitimate alias has
+  no repository above it, a planted link does. That misfires on one real setup —
+  someone whose `$HOME` is itself a git repo (yadm, `git init ~`) *and* who reaches
+  the project through a symlink under it gets no restore, silently. Both conditions
+  are needed, the walk only runs when canonicalization actually moved the path, and
+  the failure direction is conservative — but it is a silent non-restore, the exact
+  class of bug this PR fixes elsewhere. A louder failure needs a channel the
+  `SessionStart` hook does not have. (security review, 2026-08-05)
+
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
   non-following `-P` default against the real hostile-state groups, so those are no
@@ -101,7 +115,10 @@
   correctly rejected while `repo/a/b/nested/src` is not. Fix is walking up to the
   nearest repo boundary, at the cost of one stat per ancestor on every session start;
   deferred as not worth that on the common path. Documented as a blind spot in
-  SKILL.md. (concurrency fix, 2026-08-05)
+  SKILL.md. The aliasing guard added alongside the path-canonicalization fix does
+  exactly that walk, but only when the raw and canonical forms differ — so the cost
+  objection above still stands for the common path, and this item is unchanged.
+  (concurrency fix, 2026-08-05)
 - **Two armed sessions in one project can mis-pair on out-of-order clears.** The
   hook consumes the oldest fresh arm matching the project; nothing in the
   `SessionStart` payload identifies which session is clearing, so it cannot do
