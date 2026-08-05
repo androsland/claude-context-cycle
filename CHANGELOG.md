@@ -43,11 +43,14 @@ CI, and an installer that no longer eats your local edits.
   it. Both sides are now resolved to a canonical path before comparison, falling back
   to the raw string when a path cannot be resolved. Found by the new CI: every restore
   assertion failed on macOS and Windows while Linux passed, because on Linux the two
-  forms happen to be identical. **This fixes macOS and does not fix Windows** — the
-  macOS job went from 23 failures to 2 (both unrelated) while the Git Bash job failed
-  the same 19 assertions before and after, so whatever breaks the match there is a
-  different cause. Tracked in `TODOS.md`; the CI job stays red rather than being
-  dropped or excused.
+  forms happen to be identical. Windows then needed a *second* fix on top:
+  `fs.realpathSync` resolves symlinks but does not expand an 8.3 short name, so
+  canonicalizing alone took macOS from 23 failures to 2 (both unrelated) and left Git
+  Bash failing the identical 19 assertions before and after. `fs.realpathSync.native`
+  — `GetFinalPathNameByHandle` — does expand it, and is now tried first; the Windows
+  job went to 68 passed, 0 failed. A `Path forms` CI step prints both variants on
+  every platform, because the short-name diagnosis was originally *inferred* from the
+  macOS mechanism rather than measured, and was wrong about which call fixed it.
   Resolving paths is a widening on its own — *any* symlink on the clearing cwd would
   alias into whatever it targets, so a link planted inside repo B and pointed at
   project A pulled A's checkpoint into a session working in B. Narrowed by the one
@@ -76,9 +79,14 @@ CI, and an installer that no longer eats your local edits.
   extension BSD sed does not implement, so on macOS it was wrong in a second way.
 - **The suite is portable.** `touch -d '3 hours ago'` (GNU-only) is replaced by a
   node `utimesSync` helper, and payload/config paths are converted to native form on
-  Windows the way Claude Code itself sends them. Groups needing real symlinks or
-  filenames containing `"` and control bytes are skipped by name, with the reason
-  and a summary count, on filesystems that cannot host them.
+  Windows the way Claude Code itself sends them. What a filesystem can host is
+  *probed* rather than assumed from `uname` — real symlinks, `"` and control bytes in
+  a name, case sensitivity, a literal backslash in a name — and a group whose
+  prerequisite is missing is skipped by name, with the reason and a summary count,
+  rather than quietly passing. Probing earned its keep immediately: the group needing
+  `"` and control bytes was assumed unrunnable on Windows and in fact passes there.
+  Green on all three: 106 passed on ubuntu, 103 with 1 skip on macOS, 68 with 8 skips
+  on Git Bash (six of them symlink-dependent).
 
 ## v1.1.0 — 2026-08-05
 

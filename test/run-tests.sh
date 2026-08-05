@@ -61,9 +61,12 @@ age() { [ -e "$1" ] || : > "$1"; node -e 'const t = Date.now()/1000 - 10800; req
 # so the next one cannot be added without it.
 count() { wc -l | tr -d ' '; }
 
-# Capability probes for the hostile-state groups. Git Bash without
-# MSYS=winsymlinks:nativestrict turns `ln -s` into a plain copy, and NTFS rejects
-# '"' and control bytes in filenames outright.
+# Capability probes for the hostile-state groups — probed, not branched on `uname`,
+# and the difference is not academic. The symlink probe does fire on Git Bash, which
+# turns `ln -s` into a plain copy without MSYS=winsymlinks:nativestrict. The odd-names
+# one does not: `o\vd"d` creates fine there and group 14b passes on the Windows CI job,
+# so the confident claim this comment used to make about NTFS rejecting '"' and control
+# bytes was simply wrong, and only running the probe caught it.
 CAN_SYMLINK=0
 ln -s "$ROOT" "$ROOT/.symprobe" 2>/dev/null && [ -L "$ROOT/.symprobe" ] && CAN_SYMLINK=1
 rm -f "$ROOT/.symprobe" 2>/dev/null
@@ -81,11 +84,16 @@ rm -rf "$ROOT/.CaseProbe" "$ROOT/.caseprobe" 2>/dev/null
 # Whether a backslash can be an ordinary character in a directory name. It can on
 # POSIX and cannot on Windows, where it is the separator — which is exactly why the
 # hook must only collapse it there. Separate from CAN_ODD_NAMES: that probes '"' and
-# control bytes, and a volume could accept one set and not the other.
+# control bytes, and a volume could accept one set and not the other — measured, since
+# Git Bash accepts the odd names it was assumed to reject.
+# The `.bs` check is what makes this a real probe rather than a tautology: where the
+# backslash is a separator, `mkdir -p` cheerfully creates a NESTED `.bs/probe` and the
+# `-d` test on the same string then passes for entirely the wrong reason. A literal
+# one-component name leaves no `.bs` behind; a split one does.
 CAN_BACKSLASH_NAME=0
 mkdir -p "$ROOT/.bs\\probe" 2>/dev/null
-[ -d "$ROOT/.bs\\probe" ] && CAN_BACKSLASH_NAME=1
-rm -rf "$ROOT/.bs\\probe" 2>/dev/null
+[ -d "$ROOT/.bs\\probe" ] && [ ! -d "$ROOT/.bs" ] && CAN_BACKSLASH_NAME=1
+rm -rf "$ROOT/.bs\\probe" "$ROOT/.bs" 2>/dev/null
 
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.

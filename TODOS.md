@@ -1,39 +1,21 @@
 # TODOS
 
-## Broken on Windows
-
-- **No `armed.d` arm is ever matched under Git Bash — the restore is dead there.**
-  The Windows CI job fails 19 assertions: every restore returns nothing and arms
-  accumulate instead of being consumed (2 → 4 → 6 across groups 1–4). The legacy
-  single-slot `armed.json` case *passes*, and that is the tell — group 5 writes its
-  `cwd` through the same `cygpath -m` conversion the payload uses, so both sides are
-  byte-identical there, while an `armed.d` flag records
-  `git rev-parse --show-toplevel` instead and the two forms have to be reconciled.
-  **The path-canonicalization fix did not fix this.** Same job, same 19 failures
-  before (`b7efde1`, 49 passed/19 failed) and after (`7af86a0`, 49/19); the macOS job
-  over the same span went 68/23 → 101/2. So the `realpathSync` change closed the
-  macOS `/var` vs `/private/var` divergence and did nothing for Git Bash, and the
-  8.3-short-name explanation was inferred from the macOS mechanism rather than
-  measured on Windows. **Mechanism now measured**, by the `Path forms` CI step, on
-  one directory on a Git Bash runner:
-
-      git rev-parse --show-toplevel   C:/Users/runneradmin/AppData/Local/Temp/tmp.X
-      payload cwd (cygpath -m)        C:/Users/RUNNER~1/AppData/Local/Temp/tmp.X
-      fs.realpathSync                 C:\Users\RUNNER~1\...        <- still short
-      fs.realpathSync.native          C:\Users\runneradmin\...
-
-  The 8.3 short name was the right suspect and `realpathSync` was the wrong tool: it
-  resolves symlinks but does not expand a short name, where `.native`
-  (`GetFinalPathNameByHandle`) does. `canon()` now tries `.native` first, falling
-  back to the JS implementation and then the raw string.
-  **Not confirmed green yet.** The fix cannot be exercised anywhere but Windows — no
-  POSIX filesystem has short names to expand — so the Windows CI job is the only
-  evidence that exists, and this entry closes when it passes, not before. Until then
-  the job stays red rather than skipped: a skipped job reads as coverage.
-  (CI work, 2026-08-06)
-
 ## Testing
 
+- **No linter ever looks at the shell, which is most of this repo.** `arm.sh`,
+  `install.sh`, `uninstall.sh` and `test/run-tests.sh` are the bulk of the executable
+  surface, and the CI job only *runs* the suite — it does not lint any of them.
+  Successive security reviews have leaned on manual reading for the shell precisely
+  because shellcheck was not installed to back them up, which makes their scanner
+  lists read stronger than the coverage actually is. Not a claim that it would have
+  caught anything in this PR — it would not have: the defects here were a tautological
+  capability probe and two check-then-use windows, and shellcheck has no rule for
+  either. The point is narrower and duller. The quoting, expansion and exit-status
+  mistakes it *does* catch are currently caught by nobody, on four scripts that run
+  with the user's privileges and write into `~/.claude`. Fix is a `shellcheck` step in
+  `.github/workflows/test.yml` — cheap, but it will surface a first-run backlog on
+  files nobody has ever linted, so it wants its own PR rather than being bolted onto
+  this one. (security review, 2026-08-06)
 - **The symlink-dependent groups never run on Windows.** That is groups 14a, 15, 16,
   17 and 19 in full, plus group 18's symlink-refusal half — six skips. Git Bash
   turns `ln -s` into a copy unless `MSYS=winsymlinks:nativestrict` is set, which
@@ -43,12 +25,17 @@
   semantics (does `lstat` on a Windows junction report a link?) are still untested.
   Group 19 is the one that stings: it is the regression guard for the path-form
   mismatch that Git Bash's 8.3 short names caused in the first place, and on Git Bash
-  it cannot run. The real Windows coverage for that fix is the rest of the suite
-  passing there, not group 19.
+  it cannot run. The Windows coverage for that fix is the *rest* of the suite passing
+  there — which it now does, 68/0/8 — not group 19.
   Closing it means a second Windows job with `nativestrict` enabled, which tests a
   configuration most users do not have — arguably the wrong thing to assert on.
-  Group 14b is skipped there for a permanent reason, not a fixable one: NTFS cannot
-  hold a filename containing `"` or a control byte. (CI work, 2026-08-05)
+  This entry used to also claim group 14b was permanently unrunnable on Windows
+  because NTFS cannot hold `"` or a control byte in a filename. **That was wrong**:
+  the probe creates `o\vd"d` fine under Git Bash and 14b passes on the Windows job.
+  Nothing was broken by the mistake — the probe decides, and the probe was right —
+  but a `uname` branch built on the same assumption would have skipped a group that
+  works, silently. Worth remembering when the temptation is to hard-code a platform
+  rather than ask it. (CI work, 2026-08-05; 14b claim corrected 2026-08-06)
 - **The `/a/notes.md` path-rewrite case is not reachable from CI.** The fix stops
   `arm.sh` mangling a checkpoint under a single-letter top-level directory into a
   Windows drive path, but asserting it needs a directory at the filesystem root,
@@ -248,3 +235,25 @@
   assertion failed on macOS and Windows while Linux passed. Guarded by group 19,
   which reproduces the divergence with a symlink so it also runs on Linux.
   (2026-08-05)
+- **…and the Windows half needed a second fix, which the first one was claimed to
+  cover.** `fs.realpathSync` resolves symlinks but does *not* expand an 8.3 short
+  name; `fs.realpathSync.native` (`GetFinalPathNameByHandle`) does. So the entry
+  above fixed macOS and left Git Bash failing the identical 19 assertions — same job,
+  49 passed/19 failed at `b7efde1` and again at `7af86a0`, while macOS went 68/23 →
+  101/2 over the same span. The short name was the right suspect; `realpathSync` was
+  the wrong tool, and the shortfall was invisible because the diagnosis had been
+  inferred from the macOS mechanism instead of measured on Windows. A permanent
+  `Path forms` CI step now prints both variants on every platform, which is what
+  settled it:
+
+      git rev-parse --show-toplevel   C:/Users/runneradmin/AppData/Local/Temp/tmp.X
+      payload cwd (cygpath -m)        C:/Users/RUNNER~1/AppData/Local/Temp/tmp.X
+      fs.realpathSync                 C:\Users\RUNNER~1\...        <- still short
+      fs.realpathSync.native          C:\Users\runneradmin\...
+
+  `canon()` tries `.native` first, then the JS implementation, then the raw string.
+  Confirmed green: Windows went 49/19/8 → **68 passed, 0 failed, 8 skipped**, and the
+  same step on macOS shows both variants returning the identical `/private/var/…` for
+  both input forms, so the switch is a measured no-op there rather than an assumed
+  one. No test can cover this off Windows — no POSIX filesystem has a short name to
+  expand — so that job is the whole of the evidence. (CI work, 2026-08-06)
