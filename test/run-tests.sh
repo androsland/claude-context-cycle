@@ -24,13 +24,46 @@ command -v git  >/dev/null 2>&1 || { echo "git is required"  >&2; exit 2; }
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/context-cycle-test.XXXXXX")" || ROOT=""
 [ -n "$ROOT" ] && [ -d "$ROOT" ] || { echo "mktemp -d failed; refusing to run" >&2; exit 2; }
 trap 'rm -rf "$ROOT"' EXIT
-export CLAUDE_CONFIG_DIR="$ROOT/cfg"
+
+# Path form for anything handed to node or written into an arm flag. The restore
+# hook runs under NATIVE Windows node even when this suite runs in Git Bash, and
+# native node cannot resolve an MSYS path: /tmp/x is not C:\tmp\x. Claude Code
+# sends native-form cwd on Windows, so the suite must too — otherwise every scope
+# check compares /tmp/... against C:/Users/.../Temp/... and nothing ever restores.
+# A no-op on Linux and macOS, where cygpath does not exist.
+winp() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+
+CLAUDE_CONFIG_DIR="$(winp "$ROOT/cfg")"
+export CLAUDE_CONFIG_DIR
 ARMD="$CLAUDE_CONFIG_DIR/context-cycle/armed.d"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$3"; }
 eq()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
+
+# A skipped group is reported by name and re-listed in the summary. A suite that
+# quietly drops a third of itself on one platform reads as full coverage.
+SKIP=0; SKIPPED=""
+skip() { SKIP=$((SKIP+1)); SKIPPED="$SKIPPED
+  - $1 — $2"; printf '  SKIP %s\n       reason: %s\n' "$1" "$2"; }
+
+# Age a file past the hook's 3600s TTL, creating it first if absent — i.e. exactly
+# what `touch -d '3 hours ago'` did. That form is GNU-only (BSD/macOS touch has no
+# -d like it), and node is already a hard requirement of the hook under test, so
+# this adds no new dependency.
+age() { [ -e "$1" ] || : > "$1"; node -e 'const t = Date.now()/1000 - 10800; require("fs").utimesSync(process.argv[1], t, t)' "$1"; }
+
+# Capability probes for the hostile-state groups. Git Bash without
+# MSYS=winsymlinks:nativestrict turns `ln -s` into a plain copy, and NTFS rejects
+# '"' and control bytes in filenames outright.
+CAN_SYMLINK=0
+ln -s "$ROOT" "$ROOT/.symprobe" 2>/dev/null && [ -L "$ROOT/.symprobe" ] && CAN_SYMLINK=1
+rm -f "$ROOT/.symprobe" 2>/dev/null
+CAN_ODD_NAMES=0
+ODDPROBE="$ROOT/$(printf 'o\vd"d')"
+: > "$ODDPROBE" 2>/dev/null && [ -f "$ODDPROBE" ] && CAN_ODD_NAMES=1
+rm -f "$ODDPROBE" 2>/dev/null
 
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.
@@ -45,7 +78,7 @@ jsonf() { node -e '
 # Restore banner reported by a /clear in $1 (cwd). '' when the hook stays silent.
 clear_in() {
   local out
-  out=$(printf '{"source":"clear","cwd":"%s","session_id":"post-clear-new-uuid"}' "$1" | node "$HOOK")
+  out=$(printf '{"source":"clear","cwd":"%s","session_id":"post-clear-new-uuid"}' "$(winp "$1")" | node "$HOOK")
   [ -z "$out" ] && { echo ""; return; }
   printf '%s' "$out" | jsonf banner
 }
@@ -96,19 +129,19 @@ eq "newest checkpoint wins" '✓ Restored: "REDONE" · next: finish REDONE (test
 echo "=== 5. Legacy single-slot armed.json (session mid-cycle when this lands) ==="
 P5="$ROOT/p5"; mkproj "$P5"; C5="$ROOT/p5.md"; mkcp "$C5" "LEGACY"
 cat > "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" <<EOF
-{ "checkpoint": "$C5", "branch": "main", "cwd": "$P5", "armed_at": $(date +%s) }
+{ "checkpoint": "$(winp "$C5")", "branch": "main", "cwd": "$(winp "$P5")", "armed_at": $(date +%s) }
 EOF
 eq "legacy arm is consumed" '✓ Restored: "LEGACY" · next: finish LEGACY (main)' "$(clear_in "$P5")"
 eq "legacy file deleted" "absent" "$([ -e "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" ] && echo present || echo absent)"
 
 echo "=== 6. Corrupt / old-format garbage never crashes ==="
 printf 'not json at all {{{' > "$CLAUDE_CONFIG_DIR/context-cycle/armed.json"
-OUT=$(printf '{"source":"clear","cwd":"%s"}' "$P5" | node "$HOOK" 2>"$ROOT/err6"); RC=$?
+OUT=$(printf '{"source":"clear","cwd":"%s"}' "$(winp "$P5")" | node "$HOOK" 2>"$ROOT/err6"); RC=$?
 eq "exit 0 on garbage" "0" "$RC"
 eq "no stdout on garbage" "" "$OUT"
 eq "no stderr on garbage" "" "$(cat "$ROOT/err6")"
-touch -d '3 hours ago' "$CLAUDE_CONFIG_DIR/context-cycle/armed.json"
-printf '{"source":"startup","cwd":"%s"}' "$P5" | node "$HOOK" >/dev/null 2>&1
+age "$CLAUDE_CONFIG_DIR/context-cycle/armed.json"
+printf '{"source":"startup","cwd":"%s"}' "$(winp "$P5")" | node "$HOOK" >/dev/null 2>&1
 eq "old garbage reaped by sweep" "absent" "$([ -e "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" ] && echo present || echo absent)"
 
 echo "=== 7. arm.sh rejects everything that used to silently fall back ==="
@@ -128,13 +161,26 @@ eq "empty checkpoint -> rc 1"   "1" "$(rc "$ROOT/empty.md")"
 eq "nothing got armed by any of those" "0" "$(arms)"
 eq "valid path -> rc 0"         "0" "$(rc "$C7")"
 eq "and it armed"               "1" "$(arms)"
+# The MSYS /c/ -> C:/ rewrite must not fire on POSIX: it used to mangle any
+# checkpoint under a single-letter top-level directory (/a/x.md -> A:/x.md) into a
+# path the hook then cannot read. Round-trip fidelity for an ordinary path is the
+# part CI can reach; see TODOS.md for why the /a/ case itself is not testable here.
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*)
+    skip "group 7 checkpoint-verbatim assertion" "on Windows the flag correctly stores the cygpath -m form, not the MSYS input" ;;
+  *)
+    eq "checkpoint stored verbatim (no path rewriting on POSIX)" "$C7" \
+       "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+          const f=fs.readdirSync(d).filter(n=>n.endsWith(".json"))[0];
+          console.log(JSON.parse(fs.readFileSync(p.join(d,f),"utf8")).checkpoint)' "$ARMD")" ;;
+esac
 rm -f "$ARMD"/*.json
 
 echo "=== 8. TTL: a stale arm is swept, never restored ==="
 P8="$ROOT/p8"; mkproj "$P8"; C8="$ROOT/p8.md"; mkcp "$C8" "STALE"
 mkdir -p "$ARMD"
 cat > "$ARMD/deadbeef1234-oldsess.json" <<EOF
-{ "checkpoint": "$C8", "branch": "", "cwd": "$P8", "armed_at": $(( $(date +%s) - 7200 )) }
+{ "checkpoint": "$(winp "$C8")", "branch": "", "cwd": "$(winp "$P8")", "armed_at": $(( $(date +%s) - 7200 )) }
 EOF
 eq "stale arm does not restore" "" "$(clear_in "$P8")"
 eq "stale arm swept from disk"  "0" "$(arms)"
@@ -142,15 +188,15 @@ eq "stale arm swept from disk"  "0" "$(arms)"
 echo "=== 9. Non-clear session starts never consume the arm ==="
 P9="$ROOT/p9"; mkproj "$P9"; C9="$ROOT/p9.md"; mkcp "$C9" "KEEP"
 (cd "$P9" && CLAUDE_CODE_SESSION_ID=s9 bash "$ARM" "$C9" >/dev/null 2>&1)
-eq "source=startup: silent"  "" "$(printf '{"source":"startup","cwd":"%s"}' "$P9" | hook_raw)"
-eq "source=resume: silent"   "" "$(printf '{"source":"resume","cwd":"%s"}' "$P9" | hook_raw)"
-eq "source=compact: silent"  "" "$(printf '{"source":"compact","cwd":"%s"}' "$P9" | hook_raw)"
+eq "source=startup: silent"  "" "$(printf '{"source":"startup","cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
+eq "source=resume: silent"   "" "$(printf '{"source":"resume","cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
+eq "source=compact: silent"  "" "$(printf '{"source":"compact","cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
 eq "arm survived all three"  "1" "$(arms)"
 
 echo "=== 10. Unreadable/empty payload fails CLOSED (was: fired a restore) ==="
 eq "empty stdin: silent"      "" "$(hook_raw < /dev/null)"
 eq "garbage stdin: silent"    "" "$(printf 'not-json' | hook_raw)"
-eq "payload with no source: silent" "" "$(printf '{"cwd":"%s"}' "$P9" | hook_raw)"
+eq "payload with no source: silent" "" "$(printf '{"cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
 eq "arm still intact after all three" "1" "$(arms)"
 eq "a real clear still works" '✓ Restored: "KEEP" · next: finish KEEP (testbr)' "$(clear_in "$P9")"
 
@@ -188,27 +234,32 @@ P13="$ROOT/p13"; mkproj "$P13"; C13="$ROOT/p13.md"
 { printf '## Working on: BIG\n\n### Remaining Work\n1. finish BIG\n\n'
   for i in $(seq 1 400); do printf 'padding line %d with some prose to make this multi-KB\n' "$i"; done; } > "$C13"
 (cd "$P13" && CLAUDE_CODE_SESSION_ID=s13 bash "$ARM" "$C13" >/dev/null 2>&1)
-RES=$(printf '{"source":"clear","cwd":"%s"}' "$P13" | node "$HOOK" | jsonf shape)
+RES=$(printf '{"source":"clear","cwd":"%s"}' "$(winp "$P13")" | node "$HOOK" | jsonf shape)
 eq "valid JSON, complete, truncation-noted" "SessionStart true true true" "$RES"
 eq "checkpoint size on disk" "1" "$([ "$(wc -c < "$C13")" -gt 9000 ] && echo 1 || echo 0)"
 
 echo "=== 14. Hostile state dir: symlinked armed.d, control chars in paths ==="
 rm -f "$ARMD"/*.json
+P14="$ROOT/p14"; mkproj "$P14"; C14="$ROOT/p14.md"; mkcp "$C14" "SYM"
+if [ "$CAN_SYMLINK" = 1 ]; then
 # A symlinked armed.d must not become a delete-anything primitive: readdirSync +
 # unlinkSync resolve through it, so the hook would reap *.json from the target.
 # The target file must be past the TTL: sweep() only reaps an unparseable flag
 # once it is stale, so a fresh file would survive even WITHOUT the guard and the
 # assertion would pass vacuously.
-VICTIM="$ROOT/victim"; mkdir -p "$VICTIM"; touch -d '3 hours ago' "$VICTIM/precious.json"
+VICTIM="$ROOT/victim"; mkdir -p "$VICTIM"; age "$VICTIM/precious.json"
 mv "$ARMD" "$ARMD.real"; ln -s "$VICTIM" "$ARMD"
-printf '{"source":"clear","cwd":"%s"}' "$ROOT/p1" | node "$HOOK" >/dev/null 2>&1
+printf '{"source":"clear","cwd":"%s"}' "$(winp "$ROOT/p1")" | node "$HOOK" >/dev/null 2>&1
 eq "hook does not delete through a symlinked armed.d" "present" \
    "$([ -e "$VICTIM/precious.json" ] && echo present || echo GONE)"
-P14="$ROOT/p14"; mkproj "$P14"; C14="$ROOT/p14.md"; mkcp "$C14" "SYM"
 eq "arm.sh refuses a symlinked armed.d -> rc 1" "1" \
    "$( (cd "$P14" && bash "$ARM" "$C14" >/dev/null 2>&1); echo $? )"
 eq "nothing written into the symlink target" "1" "$(ls -1 "$VICTIM" | wc -l)"
 rm -f "$ARMD"; mv "$ARMD.real" "$ARMD"
+else
+  skip "group 14a (symlinked armed.d)" "this shell/filesystem does not create real symlinks"
+fi
+if [ "$CAN_ODD_NAMES" = 1 ]; then
 # A control byte in a path yields invalid JSON, which fails SILENTLY (no restore,
 # no error) until the TTL reaps it. arm.sh must reject it loudly instead.
 NLCP="$ROOT/$(printf 'we\vird').md"; mkcp "$NLCP" "CTRL" 2>/dev/null
@@ -225,46 +276,60 @@ eq "quotes/backslashes in project path still emit valid JSON" "ok" \
       if(!f.length){console.log("no flag");process.exit(0)}
       try{JSON.parse(fs.readFileSync(p.join(d,f[0]),"utf8"));console.log("ok")}
       catch(e){console.log("INVALID: "+e.message)}' "$ARMD")"
+else
+  skip "group 14b (control chars + quotes in paths)" "this filesystem rejects '\"' and control bytes in filenames"
+fi
 rm -f "$ARMD"/*.json
 
 echo "=== 15. Symlinked ANCESTOR of armed.d (leaf-only checks miss this) ==="
+if [ "$CAN_SYMLINK" != 1 ]; then
+  skip "group 15 (symlinked ancestor)" "this shell/filesystem does not create real symlinks"
+else
 # A link at context-cycle/ resolves during traversal, so armed.d inside the target
 # is a real directory and a leaf-only guard passes — the sweep then deletes out of
 # the attacker's directory. Both levels below the config root must be checked.
 R15="$ROOT/anc"; mkdir -p "$R15/cfg" "$R15/evil/armed.d"
-touch -d '3 hours ago' "$R15/evil/armed.d/precious.json"
+age "$R15/evil/armed.d/precious.json"
 ln -s "$R15/evil" "$R15/cfg/context-cycle"
 P15="$ROOT/p15"; mkproj "$P15"; C15="$ROOT/p15.md"; mkcp "$C15" "ANC"
 eq "arm.sh refuses a symlinked context-cycle/ -> rc 1" "1" \
-   "$( (cd "$P15" && CLAUDE_CONFIG_DIR="$R15/cfg" bash "$ARM" "$C15" >/dev/null 2>&1); echo $? )"
+   "$( (cd "$P15" && CLAUDE_CONFIG_DIR="$(winp "$R15/cfg")" bash "$ARM" "$C15" >/dev/null 2>&1); echo $? )"
 # Assert by NAME, not by count: the pre-fix arm.sh reaped the stale precious.json
 # via its own `find -delete` and wrote a flag in its place, leaving the count at 1.
 eq "no flag written into the link target" "precious.json" \
    "$(ls -1 "$R15/evil/armed.d" | tr '\n' ' ' | sed 's/ *$//')"
-CLAUDE_CONFIG_DIR="$R15/cfg" node "$HOOK" >/dev/null 2>&1 <<EOF
-{"source":"clear","cwd":"$P15"}
+CLAUDE_CONFIG_DIR="$(winp "$R15/cfg")" node "$HOOK" >/dev/null 2>&1 <<EOF
+{"source":"clear","cwd":"$(winp "$P15")"}
 EOF
 eq "hook does not delete through a symlinked ancestor" "present" \
    "$([ -e "$R15/evil/armed.d/precious.json" ] && echo present || echo GONE)"
+fi
 
 echo "=== 16. A symlinked CONFIG ROOT stays supported (stow/chezmoi dotfiles) ==="
+if [ "$CAN_SYMLINK" != 1 ]; then
+  skip "group 16 (symlinked config root)" "this shell/filesystem does not create real symlinks"
+else
 # The guard above must not fire here: symlinking ~/.claude into a dotfiles repo is
 # a normal setup, and refusing it would break the tool for those users.
 R16="$ROOT/dot"; mkdir -p "$R16/real-claude"; ln -s "$R16/real-claude" "$R16/claude-link"
 P16="$ROOT/p16"; mkproj "$P16"; C16="$ROOT/p16.md"; mkcp "$C16" "DOTFILES"
 eq "arm.sh accepts a symlinked config root -> rc 0" "0" \
-   "$( (cd "$P16" && CLAUDE_CONFIG_DIR="$R16/claude-link" CLAUDE_CODE_SESSION_ID=s16 bash "$ARM" "$C16" >/dev/null 2>&1); echo $? )"
+   "$( (cd "$P16" && CLAUDE_CONFIG_DIR="$(winp "$R16/claude-link")" CLAUDE_CODE_SESSION_ID=s16 bash "$ARM" "$C16" >/dev/null 2>&1); echo $? )"
 eq "flag landed in the real dir" "1" \
    "$(ls -1 "$R16/real-claude/context-cycle/armed.d"/*.json 2>/dev/null | wc -l)"
-OUT16=$(CLAUDE_CONFIG_DIR="$R16/claude-link" node "$HOOK" <<EOF
-{"source":"clear","cwd":"$P16"}
+OUT16=$(CLAUDE_CONFIG_DIR="$(winp "$R16/claude-link")" node "$HOOK" <<EOF
+{"source":"clear","cwd":"$(winp "$P16")"}
 EOF
 )
 eq "restore still fires through a symlinked config root" \
    '✓ Restored: "DOTFILES" · next: finish DOTFILES (testbr)' \
    "$([ -n "$OUT16" ] && printf '%s' "$OUT16" | jsonf banner)"
+fi
 
 echo "=== 17. The cp fallback does not write through a symlinked destination ==="
+if [ "$CAN_SYMLINK" != 1 ]; then
+  skip "group 17 (cp fallback vs symlinked destination)" "this shell/filesystem does not create real symlinks"
+else
 # `mv` renames a directory entry and never dereferences an existing destination, so
 # the primary write was always safe — asserting on it would pass against the old code
 # and prove nothing. The reachable vector is the FALLBACK: `cp` follows a destination
@@ -275,11 +340,11 @@ R17="$ROOT/wr"; mkdir -p "$R17/cfg" "$R17/victim" "$R17/bin"
 printf '#!/bin/sh\nexit 1\n' > "$R17/bin/mv"; chmod +x "$R17/bin/mv"
 P17="$ROOT/p17"; mkproj "$P17"; C17="$ROOT/p17.md"; mkcp "$C17" "WRITE"
 # Learn this project's real flag path, then re-run with a symlink sitting on it.
-DEST17=$( (cd "$P17" && CLAUDE_CONFIG_DIR="$R17/cfg" CLAUDE_CODE_SESSION_ID=s17 \
+DEST17=$( (cd "$P17" && CLAUDE_CONFIG_DIR="$(winp "$R17/cfg")" CLAUDE_CODE_SESSION_ID=s17 \
            bash "$ARM" "$C17" 2>/dev/null) | sed -n 's/^ARM_FLAG -> //p')
 echo "PRECIOUS" > "$R17/victim/dest.txt"
 rm -f "$DEST17"; ln -s "$R17/victim/dest.txt" "$DEST17"
-(cd "$P17" && PATH="$R17/bin:$PATH" CLAUDE_CONFIG_DIR="$R17/cfg" CLAUDE_CODE_SESSION_ID=s17 \
+(cd "$P17" && PATH="$R17/bin:$PATH" CLAUDE_CONFIG_DIR="$(winp "$R17/cfg")" CLAUDE_CODE_SESSION_ID=s17 \
    bash "$ARM" "$C17" >/dev/null 2>&1)
 eq "cp fallback does not write through a symlinked flag path" "PRECIOUS" \
    "$(cat "$R17/victim/dest.txt")"
@@ -293,7 +358,43 @@ eq "the fallback still arms correctly" "WRITE" \
 # a stranded temp would otherwise sit under a name the old *.json sweep never reaped.
 eq "no temp file left behind" "0" \
    "$(ls -1a "$R17/cfg/context-cycle/armed.d" | grep -c '^\.tmp\.' || true)"
+fi
+
+echo "=== 18. install.sh: idempotent, and never silently reverts a local edit ==="
+# The installer is the one component with no coverage at all, and its bare `cp`
+# over an installed file is exactly how a patched copy used to vanish without a
+# trace. Installs into a throwaway config dir; the repo clone is present, so the
+# curl branch is never taken and this stays offline.
+I="$(winp "$ROOT/inst")"; mkdir -p "$ROOT/inst"
+inst() { (CLAUDE_CONFIG_DIR="$I" bash "$REPO/install.sh" 2>&1); }
+OUT18=$(inst); eq "install exits 0" "0" "$?"
+eq "skill installed"    "1" "$([ -f "$ROOT/inst/skills/context-cycle/SKILL.md" ] && echo 1 || echo 0)"
+eq "arm.sh installed"   "1" "$([ -f "$ROOT/inst/skills/context-cycle/arm.sh" ] && echo 1 || echo 0)"
+eq "hook installed"     "1" "$([ -f "$ROOT/inst/hooks/context-cycle-restore.mjs" ] && echo 1 || echo 0)"
+eq "SessionStart hook wired into settings.json" "1" \
+   "$(grep -c 'context-cycle-restore' "$ROOT/inst/settings.json" 2>/dev/null || echo 0)"
+# A reinstall of unchanged files must not churn a backup for every file it touches.
+OUT18B=$(inst)
+eq "reinstall reports the hook already present" "1" \
+   "$(printf '%s' "$OUT18B" | grep -c 'already present')"
+eq "no .bak churn when nothing differs" "0" \
+   "$(ls -1 "$ROOT/inst/skills/context-cycle"/*.bak "$ROOT/inst/hooks"/*.bak 2>/dev/null | wc -l | tr -d ' ')"
+# The reported bug: a locally patched install is overwritten with no diff, no
+# prompt and no backup. It must still be overwritten — but recoverably.
+printf '\n# LOCAL PATCH\n' >> "$ROOT/inst/skills/context-cycle/arm.sh"
+OUT18C=$(inst)
+eq "local edit is backed up"     "1" "$([ -f "$ROOT/inst/skills/context-cycle/arm.sh.bak" ] && echo 1 || echo 0)"
+eq "backup holds the local edit" "1" "$(grep -c 'LOCAL PATCH' "$ROOT/inst/skills/context-cycle/arm.sh.bak")"
+eq "destination is the shipped version" "0" "$(grep -c 'LOCAL PATCH' "$ROOT/inst/skills/context-cycle/arm.sh")"
+eq "destination matches the repo byte for byte" "same" \
+   "$(cmp -s "$REPO/context-cycle/arm.sh" "$ROOT/inst/skills/context-cycle/arm.sh" && echo same || echo DIFFERS)"
+eq "the overwrite is announced, not silent" "1" \
+   "$(printf '%s' "$OUT18C" | grep -c 'arm.sh.bak')"
+# Only the modified file gets a backup — an untouched sibling must stay clean.
+eq "untouched sibling not backed up" "0" \
+   "$([ -f "$ROOT/inst/skills/context-cycle/SKILL.md.bak" ] && echo 1 || echo 0)"
 
 echo
-printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
+printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
+[ "$SKIP" -eq 0 ] || printf 'skipped on this platform (%s):%s\n' "$(uname -s 2>/dev/null || echo unknown)" "$SKIPPED"
 [ "$FAIL" -eq 0 ]

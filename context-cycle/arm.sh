@@ -86,13 +86,24 @@ esac
 [ -s "$CP" ] || die "checkpoint file is empty: $CP
   Write the checkpoint contents (Step 2) before arming (Step 3)."
 
-# Native Windows node reads C:/... not MSYS /c/...; convert when possible so the
-# hook (which runs under native node on Windows) can read the checkpoint path.
-if command -v cygpath >/dev/null 2>&1; then
-  CP_NODE=$(cygpath -m "$CP")
-else
-  CP_NODE=$(printf '%s' "$CP" | sed -E 's#^/([a-zA-Z])/#\U\1:/#')
-fi
+# Native Windows node reads C:/... not MSYS /c/..., so convert — but ONLY when
+# actually running under MSYS/Cygwin. On Linux and macOS `/c/foo` is an ordinary
+# absolute path, and rewriting it to `C:/foo` points the hook at a file that does
+# not exist. The previous unconditional `sed -E 's#^/([a-zA-Z])/#\U\1:/#'` did
+# exactly that to any checkpoint under a single-letter top-level directory, and
+# `\U` is a GNU extension that BSD sed does not implement at all.
+CP_NODE="$CP"
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if command -v cygpath >/dev/null 2>&1; then
+      CP_NODE=$(cygpath -m "$CP")
+    else
+      # Same conversion without GNU sed: /c/x -> C:/x, anything else untouched.
+      case "$CP" in
+        /[A-Za-z]/*) CP_NODE="$(printf '%s' "$CP" | cut -c2 | tr 'a-z' 'A-Z'):${CP#/?}" ;;
+      esac
+    fi ;;
+esac
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 # Project scope: the repo root this cycle belongs to. The restore hook only fires

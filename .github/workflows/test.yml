@@ -1,0 +1,53 @@
+name: tests
+
+# The suite is dependency-free (bash + node + git) and writes only to a throwaway
+# CLAUDE_CONFIG_DIR under a temp dir, so it is safe to run on hosted runners.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platforms on one failure: the whole point of the
+      # matrix is to see WHICH platform disagrees.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The suite's assertions depend on which toolchain implementations are in
+      # play — GNU vs BSD sed/find/mktemp, bash 3.2 vs 5.x on macOS, Git Bash's
+      # MSYS layer on Windows. Print them so a platform-only failure is
+      # diagnosable from the log alone.
+      - name: Toolchain
+        shell: bash
+        run: |
+          echo "uname:  $(uname -s) $(uname -r)"
+          echo "bash:   $BASH_VERSION"
+          echo "node:   $(node --version)"
+          echo "git:    $(git --version)"
+          echo "sed:    $(sed --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+          echo "find:   $(find --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+          echo "mktemp: $(mktemp --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+
+      # windows-latest + `shell: bash` is Git Bash, which is the environment this
+      # tool actually runs in on Windows. MSYS=winsymlinks:nativestrict is
+      # deliberately NOT set: a normal user's Git Bash does not have it, `ln -s`
+      # there copies instead of linking, and the suite's capability probe skips
+      # the symlink groups by name rather than pretending to cover them.
+      - name: Run the suite
+        shell: bash
+        run: bash test/run-tests.sh

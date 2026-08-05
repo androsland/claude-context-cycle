@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+CI, and an installer that no longer eats your local edits.
+
+- **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
+  push and pull request. Nothing ran it before except a human remembering to.
+- **`install.sh` backs up a modified file before overwriting it.** It used to `cp`
+  straight over an installed copy — no diff, no prompt, no way back — which silently
+  reverted anyone who had patched their install. Now a destination that differs from
+  the shipped version is copied to `<file>.bak` first and the overwrite is named in
+  the output. Unchanged files are left alone, so a no-op reinstall creates no
+  backups, and each file keeps exactly one `.bak` (overwritten each run) so they
+  cannot pile up. Matches how `settings.json` was already handled.
+- **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
+  `/c/…` → `C:/…` conversion ran unconditionally, so a checkpoint under any
+  single-letter top-level directory (`/a/notes.md`) was stored as `A:/notes.md` — a
+  path the hook cannot read, making the restore silently do nothing. It is now gated
+  on actually running under MSYS/Cygwin. The old expression also used `\U`, a GNU sed
+  extension BSD sed does not implement, so on macOS it was wrong in a second way.
+- **The suite is portable.** `touch -d '3 hours ago'` (GNU-only) is replaced by a
+  node `utimesSync` helper, and payload/config paths are converted to native form on
+  Windows the way Claude Code itself sends them. Groups needing real symlinks or
+  filenames containing `"` and control bytes are skipped by name, with the reason
+  and a summary count, on filesystems that cannot host them.
+
 ## v1.1.0 — 2026-08-05
 
 Concurrency fix. Two sessions cycling at the same time could restore each other's
