@@ -441,6 +441,39 @@ else
   skip "group 18 symlinked-destination refusal" "this shell/filesystem does not create real symlinks"
 fi
 
+echo "=== 19. Same project, two path forms: the arm must still match ==="
+# arm.cwd comes from `git rev-parse --show-toplevel` (PHYSICAL path); the payload
+# cwd is whatever the session was launched in (possibly LOGICAL). They name the
+# same directory and must match. This is not hypothetical: on macOS a repo under
+# /var or /tmp is /private/... to git and /... to the shell, and in Git Bash the
+# same directory can be an 8.3 short name on one side and the long name on the
+# other. Both platforms failed EVERY restore assertion in CI before this was
+# fixed, while Linux passed — the two forms happen to be identical there. A
+# symlinked path reproduces the same divergence on any platform that has links.
+if [ "$CAN_SYMLINK" = 1 ]; then
+  P19="$ROOT/p19"; mkproj "$P19"
+  ln -s "$P19" "$ROOT/p19-link"
+  C19="$ROOT/p19.md"; mkcp "$C19" "TWOFORMS"
+  # Arm through the link: git reports the physical path, so arm.cwd is $ROOT/p19.
+  (cd "$ROOT/p19-link" && CLAUDE_CODE_SESSION_ID=ff19-1919 bash "$ARM" "$C19" >/dev/null 2>&1)
+  eq "clear at the physical path restores" \
+     '✓ Restored: "TWOFORMS" · next: finish TWOFORMS (testbr)' "$(clear_in "$P19")"
+  # And the reverse: armed at the physical path, cleared through the link.
+  mkcp "$C19" "TWOFORMS"
+  (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-2929 bash "$ARM" "$C19" >/dev/null 2>&1)
+  eq "clear at the logical path restores" \
+     '✓ Restored: "TWOFORMS" · next: finish TWOFORMS (testbr)' "$(clear_in "$ROOT/p19-link")"
+  eq "no arm left over" "0" "$(arms)"
+  # Canonicalizing must not widen scope: an unrelated project still gets nothing.
+  P19B="$ROOT/p19b"; mkproj "$P19B"
+  (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-3939 bash "$ARM" "$C19" >/dev/null 2>&1)
+  eq "an unrelated project still does not match" "" "$(clear_in "$P19B")"
+  eq "and that arm is still armed" "1" "$(arms)"
+  rm -f "$ARMD"/*.json 2>/dev/null || true
+else
+  skip "group 19 two-path-form scope matching" "this shell/filesystem does not create real symlinks"
+fi
+
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
 [ "$SKIP" -eq 0 ] || printf 'skipped on this platform (%s):%s\n' "$(uname -s 2>/dev/null || echo unknown)" "$SKIPPED"

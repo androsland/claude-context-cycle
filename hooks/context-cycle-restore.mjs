@@ -156,14 +156,30 @@ function sweep(now) {
 //     how a nested repo or submodule in a monorepo gets correctly rejected;
 //   - an arm with no recorded cwd (hand-written / very old) is unscoped;
 //   - an unknown current cwd fails closed and leaves the arm alone.
+// Resolve to a canonical path before comparing. The two sides come from different
+// places and legitimately name the same directory in different forms: arm.cwd is
+// `git rev-parse --show-toplevel`, which returns the PHYSICAL path, while the
+// payload cwd is whatever the session was launched in, which may be logical. On
+// macOS a repo under /tmp or /var is /private/... to git and /... to the shell; in
+// Git Bash the same directory can be an 8.3 short name on one side and the long
+// name on the other. Neither is reconcilable by string rewriting, and a mismatch
+// fails silently — the arm simply never matches and the restore does nothing.
+// Falls back to the raw string when the path cannot be resolved (deleted, or a
+// hand-written flag), which preserves the old behaviour for those cases.
+function canon(p) {
+  if (!p) return '';
+  const s = String(p);
+  try { return realpathSync(s); } catch { return s; }
+}
 function scopeAllows(armedCwd, curCwdRaw) {
-  const a = norm(armedCwd);
-  if (!a) return true;
-  const c = norm(curCwdRaw);
+  if (!norm(armedCwd)) return true;
+  const a = norm(canon(armedCwd));
+  const cRaw = canon(curCwdRaw);
+  const c = norm(cRaw);
   if (!c) return false;
   if (a === c) return true;
   if (!c.startsWith(a + '/')) return false;
-  try { return !existsSync(join(String(curCwdRaw), '.git')); } catch { return true; }
+  try { return !existsSync(join(cRaw, '.git')); } catch { return true; }
 }
 
 // MSYS /c/... -> C:/... for native Windows node.

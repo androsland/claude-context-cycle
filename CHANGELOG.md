@@ -33,6 +33,18 @@ CI, and an installer that no longer eats your local edits.
   the output. Unchanged files are left alone, so a no-op reinstall creates no
   backups, and each file keeps exactly one `.bak` (overwritten each run) so they
   cannot pile up. Matches how `settings.json` was already handled.
+- **A project armed under one form of its path is now restored under any other.**
+  `arm.sh` records the project from `git rev-parse --show-toplevel`, which returns the
+  *physical* path, while the `SessionStart` payload carries whatever the session was
+  launched in, which may be *logical*. Those name the same directory and the hook
+  compared them as strings, so they missed: on macOS a repo under `/tmp` or `/var` is
+  `/private/…` to git and `/…` to the shell, and under Git Bash the same directory can
+  be an 8.3 short name (`RUNNER~1`) on one side and the long name on the other. The
+  failure was silent — the arm simply never matched, the restore did nothing, and the
+  flag sat there until the TTL reaped it. Both sides are now resolved to a canonical
+  path before comparison, falling back to the raw string when a path cannot be
+  resolved. Found by the new CI: every restore assertion failed on macOS and Windows
+  while Linux passed, because on Linux the two forms happen to be identical.
 - **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
   `/c/…` → `C:/…` conversion ran unconditionally, so a checkpoint under any
   single-letter top-level directory (`/a/notes.md`) was stored as `A:/notes.md` — a

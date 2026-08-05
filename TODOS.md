@@ -2,12 +2,17 @@
 
 ## Testing
 
-- **The symlink-dependent groups (14a, 15, 16, 17) never run on Windows.** Git Bash
+- **The symlink-dependent groups never run on Windows.** That is groups 14a, 15, 16,
+  17 and 19 in full, plus group 18's symlink-refusal half — six skips. Git Bash
   turns `ln -s` into a copy unless `MSYS=winsymlinks:nativestrict` is set, which
-  needs Developer Mode or admin, so the suite's capability probe skips those four
-  groups there — reported by name, but skipped. The hostile-state guarding in
+  needs Developer Mode or admin, so the suite's capability probe skips them there —
+  reported by name, but skipped. The hostile-state guarding in
   `arm.sh` and the hook is therefore verified on Linux and macOS only; MSYS symlink
   semantics (does `lstat` on a Windows junction report a link?) are still untested.
+  Group 19 is the one that stings: it is the regression guard for the path-form
+  mismatch that Git Bash's 8.3 short names caused in the first place, and on Git Bash
+  it cannot run. The real Windows coverage for that fix is the rest of the suite
+  passing there, not group 19.
   Closing it means a second Windows job with `nativestrict` enabled, which tests a
   configuration most users do not have — arguably the wrong thing to assert on.
   Group 14b is skipped there for a permanent reason, not a fixable one: NTFS cannot
@@ -30,7 +35,7 @@
   `armed.json`) controls three fields the hook acts on unconditionally: `checkpoint`
   is read verbatim from *any* absolute path with no restriction to the checkpoints
   directory; an omitted or empty `cwd` makes `scopeAllows()`
-  (hooks/context-cycle-restore.mjs:135-143) treat the arm as unscoped, matching the
+  (hooks/context-cycle-restore.mjs:174-183) treat the arm as unscoped, matching the
   next `/clear` in any project; `armed_at` and `branch` are freely forgeable. The
   result is a prompt-injection primitive — attacker-chosen file content injected as
   `additionalContext` under the hook's own "resume from this, don't repeat it"
@@ -91,7 +96,7 @@
 ## Restore semantics
 
 - **A `/clear` inside a nested repo's *subdirectory* still matches the parent's arm.**
-  `scopeAllows()` (hooks/context-cycle-restore.mjs:142) stats `.git` in the clearing
+  `scopeAllows()` (hooks/context-cycle-restore.mjs:182) stats `.git` in the clearing
   cwd only, never the path between it and the armed root — so `repo/a/b/nested` is
   correctly rejected while `repo/a/b/nested/src` is not. Fix is walking up to the
   nearest repo boundary, at the cost of one stat per ancestor on every session start;
@@ -127,3 +132,10 @@
   `/c/` → `C:/` conversion ran unconditionally, so `/a/notes.md` was stored as
   `A:/notes.md` and the restore silently did nothing; it is now gated on actually
   running under MSYS/Cygwin. (2026-08-05)
+- **The hook matches a project across path forms.** `arm.cwd` is git's *physical*
+  path; the payload `cwd` may be *logical*. `scopeAllows()` now canonicalizes both
+  before comparing, so `/private/var/…` vs `/var/…` on macOS and 8.3 vs long names
+  under Git Bash no longer silently fail to restore. Found by CI — every restore
+  assertion failed on macOS and Windows while Linux passed. Guarded by group 19,
+  which reproduces the divergence with a symlink so it also runs on Linux.
+  (2026-08-05)
