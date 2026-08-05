@@ -137,8 +137,23 @@ ESC_CP=$(esc "$CP_NODE")
 ESC_BR=$(esc "$BRANCH")
 ESC_CWD=$(esc "$CWD")
 
+# Re-check right before writing. The guard above ran before mkdir and before several
+# subprocesses (git, date, sha1sum) — long enough for someone with write access to
+# $STATE_DIR to swap in a link afterwards. This narrows that window; it does not close
+# it, and bash has no atomic way to. It is cheap, so it is worth having.
+for d in "$STATE_DIR" "$ARM_DIR"; do
+  [ -L "$d" ] && die "$d became a symlink while arming. Refusing to write through it."
+done
+
 # Write via temp + rename so the hook never reads a half-written flag.
-TMP="$ARM_DIR/.tmp.$$.json"
+#
+# mktemp, not ".tmp.$$": a PID is sequential and guessable, and `cat >` follows an
+# existing symlink — so a pre-placed .tmp.<PID> link pointed anywhere would have this
+# script write the flag straight into that file. mktemp creates with O_EXCL, which
+# fails on a symlink instead of following it, and picks an unpredictable name.
+# The `.tmp.` prefix is load-bearing: the hook skips those when reading arms and
+# reaps them separately past the TTL.
+TMP=$(mktemp "$ARM_DIR/.tmp.XXXXXX") || die "could not create a temp file in $ARM_DIR"
 cat > "$TMP" <<EOF
 {
   "checkpoint": "$ESC_CP",
@@ -147,10 +162,17 @@ cat > "$TMP" <<EOF
   "armed_at": $NOW
 }
 EOF
-mv -f "$TMP" "$DEST" 2>/dev/null || { cp -f "$TMP" "$DEST"; rm -f "$TMP"; }
+# `mv` renames the directory entry and never dereferences an existing $DEST, so the
+# normal path is safe. `cp` DOES follow a destination symlink, and $DEST is fully
+# predictable (hash of the project path + session id) — so unlink first and let cp
+# create a fresh file.
+mv -f "$TMP" "$DEST" 2>/dev/null || { rm -f "$DEST"; cp -f "$TMP" "$DEST"; rm -f "$TMP"; }
 
-# Reap arms and temp files past the hook's TTL (3600s). Never touches checkpoints.
-find "$ARM_DIR" -maxdepth 1 -type f -name '*.json' -mmin +60 -delete 2>/dev/null || true
+# Reap arms and abandoned temp files past the hook's TTL (3600s). Never touches
+# checkpoints. `find` does not follow a symlinked start point (POSIX default, -P),
+# so a link swapped in for $ARM_DIR makes this a no-op rather than a delete
+# elsewhere — verified against GNU findutils 4.8.0.
+find "$ARM_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '.tmp.*' \) -mmin +60 -delete 2>/dev/null || true
 
 echo "ARMED -> $CP_NODE"
 echo "ARM_FLAG -> $DEST"

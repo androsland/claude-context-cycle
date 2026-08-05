@@ -52,6 +52,20 @@
   dir, and stop treating a missing `cwd` as match-everything except for the legacy
   `armed.json` migration path specifically. (security review, 2026-08-05)
 
+- **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
+  `context-cycle/` and `armed.d/` runs at startup and again immediately before the
+  write (arm.sh:43-50, 140-146), but `mkdir -p`, `git rev-parse`, `date`, and the hash
+  subprocess all run in between, and the two `find`/`mv` calls after it re-use the
+  same path strings. Someone who can write the parent directory can swap in a link
+  inside that window. The second check narrows it to microseconds; bash has no atomic
+  way to close it (no `openat`/`O_NOFOLLOW`), so closing it properly means moving the
+  write into the node hook or a helper that can hold a directory fd. Same threat-model
+  bound as the arm-flag-trust item above — write access to `~/.claude/context-cycle/`
+  usually implies write access to `~/.claude/hooks/*.mjs`, which is strictly stronger.
+  Note the TTL sweep is *not* part of this: `find` does not follow a symlinked start
+  point (POSIX default `-P`, verified on GNU findutils 4.8.0), so a swapped link makes
+  it a no-op. (security review, 2026-08-05)
+
 ## Restore semantics
 
 - **A `/clear` inside a nested repo's *subdirectory* still matches the parent's arm.**

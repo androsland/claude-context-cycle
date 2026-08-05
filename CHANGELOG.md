@@ -45,15 +45,22 @@ a test suite.
   resolves the root first so only the tool's own subdirectories are constrained.
   (`uninstall.sh`'s `rm -rf` was already safe here: `rm` unlinks a symlink without
   recursing into its target.)
+- **The flag write no longer follows a symlink sitting on its path.** The temp file
+  was named from the shell PID — sequential and guessable — and `cat >` follows an
+  existing symlink, so a pre-placed `.tmp.<pid>.json` link would have `arm.sh` write
+  the flag into whatever it pointed at. It now uses `mktemp`, which creates with
+  `O_EXCL` and fails on a link rather than following it. The `cp` fallback (used only
+  if `mv` fails) unlinks the destination first, since `cp` follows a destination
+  symlink where `mv` does not, and the flag name is derived from public information.
 - **Control characters in a path are rejected instead of silently breaking the flag.**
   A raw control byte in the checkpoint or project path produced invalid JSON, which
   failed *silently* — no restore, no error, until the TTL reaped it. `arm.sh` now
   fails loudly, with a control-byte strip in the JSON escaper as a backstop.
-- **Test suite added** — `bash test/run-tests.sh`, 64 assertions across 16 groups,
+- **Test suite added** — `bash test/run-tests.sh`, 68 assertions across 17 groups,
   including a direct reproduction of the reported two-session bug, a hostile state
-  dir (symlink at `armed.d` *or* at its parent, control characters in paths), and a
-  symlinked config root, which must keep working. Runs against a throwaway
-  `CLAUDE_CONFIG_DIR`; needs only bash, node, and git.
+  dir (symlink at `armed.d`, at its parent, or on the flag path itself; control
+  characters in paths), and a symlinked config root, which must keep working. Runs
+  against a throwaway `CLAUDE_CONFIG_DIR`; needs only bash, node, and git.
 - `uninstall.sh` now removes `armed.d/` as well as the pre-1.1 `armed.json` and
   `.pending-file`.
 

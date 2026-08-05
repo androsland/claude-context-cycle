@@ -264,6 +264,36 @@ eq "restore still fires through a symlinked config root" \
    '✓ Restored: "DOTFILES" · next: finish DOTFILES (testbr)' \
    "$([ -n "$OUT16" ] && printf '%s' "$OUT16" | jsonf banner)"
 
+echo "=== 17. The cp fallback does not write through a symlinked destination ==="
+# `mv` renames a directory entry and never dereferences an existing destination, so
+# the primary write was always safe — asserting on it would pass against the old code
+# and prove nothing. The reachable vector is the FALLBACK: `cp` follows a destination
+# symlink, and the flag name is derived from public info (project path + session id).
+# So force the fallback with a failing `mv` on PATH, which is the only way to exercise
+# that branch deterministically.
+R17="$ROOT/wr"; mkdir -p "$R17/cfg" "$R17/victim" "$R17/bin"
+printf '#!/bin/sh\nexit 1\n' > "$R17/bin/mv"; chmod +x "$R17/bin/mv"
+P17="$ROOT/p17"; mkproj "$P17"; C17="$ROOT/p17.md"; mkcp "$C17" "WRITE"
+# Learn this project's real flag path, then re-run with a symlink sitting on it.
+DEST17=$( (cd "$P17" && CLAUDE_CONFIG_DIR="$R17/cfg" CLAUDE_CODE_SESSION_ID=s17 \
+           bash "$ARM" "$C17" 2>/dev/null) | sed -n 's/^ARM_FLAG -> //p')
+echo "PRECIOUS" > "$R17/victim/dest.txt"
+rm -f "$DEST17"; ln -s "$R17/victim/dest.txt" "$DEST17"
+(cd "$P17" && PATH="$R17/bin:$PATH" CLAUDE_CONFIG_DIR="$R17/cfg" CLAUDE_CODE_SESSION_ID=s17 \
+   bash "$ARM" "$C17" >/dev/null 2>&1)
+eq "cp fallback does not write through a symlinked flag path" "PRECIOUS" \
+   "$(cat "$R17/victim/dest.txt")"
+eq "the flag path is a real file afterwards" "file" \
+   "$([ -L "$DEST17" ] && echo LINK || { [ -f "$DEST17" ] && echo file || echo missing; })"
+eq "the fallback still arms correctly" "WRITE" \
+   "$(node -e 'const fs=require("fs");
+      const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+      console.log(fs.readFileSync(a.checkpoint,"utf8").match(/Working on: (\w+)/)[1])' "$DEST17" 2>/dev/null)"
+# mktemp names are random, so the guarantee to assert is that none are left behind:
+# a stranded temp would otherwise sit under a name the old *.json sweep never reaped.
+eq "no temp file left behind" "0" \
+   "$(ls -1a "$R17/cfg/context-cycle/armed.d" | grep -c '^\.tmp\.' || true)"
+
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
