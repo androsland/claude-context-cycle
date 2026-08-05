@@ -97,7 +97,17 @@
   are needed, the walk only runs when canonicalization actually moved the path, and
   the failure direction is conservative — but it is a silent non-restore, the exact
   class of bug this PR fixes elsewhere. A louder failure needs a channel the
-  `SessionStart` hook does not have. (security review, 2026-08-05)
+  `SessionStart` hook does not have.
+  **And it does not close aliasing in general — only the in-repo delivery vector.**
+  A link with *no* repository above it (say `/tmp/foo` → the victim's project) still
+  aliases through, verified. That is not closable: it is byte-for-byte the same
+  situation as the macOS `/var` alias and as a user's own `~/dev/proj` symlink, which
+  are the cases the canonicalization exists to serve. The vector that *is* closed is
+  the realistic one — a symlink tracked in a repository you clone (git stores those
+  as mode 120000 blobs) pointed at a guessable project path. Weigh the residual
+  against what it yields: the content injected is the user's own checkpoint, and the
+  session's cwd physically *is* the armed project, so the reader is the person who
+  wrote it. (security review, 2026-08-05)
 
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
