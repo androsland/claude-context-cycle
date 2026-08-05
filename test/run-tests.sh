@@ -406,6 +406,37 @@ if [ "$CAN_SYMLINK" = 1 ]; then
      "$([ -e "$ROOT/inst/skills/context-cycle/SKILL.md.bak" ] && echo 1 || echo 0)"
   eq "link target never written through" "SECRET-KEY-MATERIAL" "$(cat "$ROOT/inst-secret")"
   rm -f "$ROOT/inst/skills/context-cycle/SKILL.md"
+  inst >/dev/null 2>&1   # restore a clean install for the cases below
+
+  # The .bak name is the same primitive one suffix over, and worse: `cp` follows a
+  # link at its DESTINATION too, so a link pre-placed at the (entirely predictable)
+  # .bak path makes the backup step write $dest's contents into it. This branch
+  # fires on any upgrade where the installed file differs — not a rare edge case.
+  printf 'SECRET-KEY-MATERIAL\n' > "$ROOT/inst-secret"
+  printf '\n# LOCAL PATCH\n' >> "$ROOT/inst/skills/context-cycle/SKILL.md"   # force the backup branch
+  ln -s "$ROOT/inst-secret" "$ROOT/inst/skills/context-cycle/SKILL.md.bak"
+  eq "install refuses a symlinked .bak -> rc 1" "1" "$( (inst >/dev/null 2>&1); echo $? )"
+  eq "nothing written through the .bak link" "SECRET-KEY-MATERIAL" "$(cat "$ROOT/inst-secret")"
+  eq "the local edit is still there, not clobbered" "1" \
+     "$(grep -c 'LOCAL PATCH' "$ROOT/inst/skills/context-cycle/SKILL.md")"
+  rm -f "$ROOT/inst/skills/context-cycle/SKILL.md.bak"
+
+  # settings.json.bak is the same hazard in the node block: copyFileSync follows a
+  # symlinked destination exactly as cp does.
+  ln -s "$ROOT/inst-secret" "$ROOT/inst/settings.json.bak"
+  inst >/dev/null 2>&1
+  eq "settings backup never written through a link" "SECRET-KEY-MATERIAL" "$(cat "$ROOT/inst-secret")"
+  rm -f "$ROOT/inst/settings.json.bak"
+
+  # A leaf check cannot see a link on the path LEADING to the file: `mkdir -p`
+  # resolves a symlinked directory and succeeds, after which every [ -L ] on a
+  # file inside it is false and the shipped files land in the link's target.
+  J="$(winp "$ROOT/inst2")"; mkdir -p "$ROOT/inst2/skills" "$ROOT/decoy"
+  ln -s "$ROOT/decoy" "$ROOT/inst2/skills/context-cycle"
+  eq "install refuses a symlinked skill DIRECTORY -> rc 1" "1" \
+     "$( (CLAUDE_CONFIG_DIR="$J" bash "$REPO/install.sh" >/dev/null 2>&1); echo $? )"
+  eq "nothing installed into the link's target" "0" \
+     "$(ls -1 "$ROOT/decoy" | wc -l | tr -d ' ')"
 else
   skip "group 18 symlinked-destination refusal" "this shell/filesystem does not create real symlinks"
 fi

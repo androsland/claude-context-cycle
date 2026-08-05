@@ -64,6 +64,22 @@
   BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
   (security review, 2026-08-05)
 
+- **`install.sh` still installs through a symlink one level above what it guards.**
+  It refuses a link at an installed file, at that file's `.bak`, and at the two
+  directories it creates (`skills/context-cycle/`, `context-cycle/`) — but not at
+  `~/.claude`, `~/.claude/skills` or `~/.claude/hooks`, so a link pre-placed at one
+  of those makes `mkdir -p` resolve through it and every leaf `[ -L ]` read false.
+  Deliberate, not an oversight: those three are Claude Code's, shared with every
+  other skill and hook, and pointing them at a dotfiles repo (stow, chezmoi) is a
+  normal setup that a refusal would break — the same line `arm.sh` and the restore
+  hook already draw when they constrain `context-cycle/` and `armed.d/` but let
+  `~/.claude` be a link. Bounded by the same threat model as the two items above:
+  the content written is the fixed shipped bytes, and anyone who can pre-place that
+  link can write `~/.claude/hooks/*.mjs` directly for outright code execution.
+  Closing it properly means walking every ancestor up to `$CLAUDE_DIR` and asking
+  the user per link, which is a worse trade than stating the limit.
+  (security review, 2026-08-05)
+
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
   non-following `-P` default against the real hostile-state groups, so those are no
@@ -102,7 +118,8 @@
   destinations are copied to `<file>.bak` and named in the output; unchanged files
   are skipped so a no-op reinstall creates no backups, and each file keeps exactly
   one `.bak` so they cannot accumulate. Covered by test group 18, which also pins
-  installer idempotence. (2026-08-05)
+  installer idempotence and the four symlink refusals (destination, `.bak`,
+  `settings.json.bak`, skill directory). (2026-08-05)
 - **`test/run-tests.sh` no longer needs GNU tools.** `touch -d '3 hours ago'` is now
   a node `utimesSync` helper, and payload/config paths are converted to native form
   on Windows the way Claude Code sends them. (2026-08-05)

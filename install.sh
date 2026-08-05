@@ -46,6 +46,21 @@ fetch() { # $1 = repo-relative path, $2 = destination
   point CLAUDE_CONFIG_DIR somewhere else) and re-run."
   fi
 
+  # The .bak path needs the SAME check, and it is the more dangerous of the two.
+  # `cp "$dest" "$dest.bak"` follows a link at its *destination* argument exactly
+  # as the original bare `cp` did — so a link pre-placed at the (entirely
+  # predictable) .bak name makes the backup step write the current contents of
+  # $dest through it into an arbitrary file. That branch fires on every upgrade
+  # where the installed file differs, not just on a hand-patched copy. Unlike a
+  # symlinked $dest there is no legitimate setup this breaks: nothing has reason
+  # to pre-create <installed file>.bak as a link, so refuse it outright.
+  if [ -L "$dest.bak" ]; then
+    die "$dest.bak is a symlink.
+  Refusing to back up through it: the backup would write $dest's contents into
+  the link's target. Nothing this installer does creates that link — delete it
+  and re-run."
+  fi
+
   if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$rel" ]; then
     src="$SELF_DIR/$rel"
   else
@@ -74,6 +89,28 @@ fetch() { # $1 = repo-relative path, $2 = destination
 }
 
 echo "Installing context-cycle into: $CLAUDE_DIR"
+
+# `[ -L "$dest" ]` inside fetch() is a LEAF check: it sees a link AT the file, not
+# a link on the path leading to it. `mkdir -p` resolves an existing symlinked
+# directory and succeeds without recreating it, after which every leaf test is
+# false and the shipped files land in the link's target. Check the two
+# directories this tool creates and owns before creating them.
+#
+# Deliberately NOT checked: $CLAUDE_DIR itself, $CLAUDE_DIR/skills and
+# $CLAUDE_DIR/hooks. Those are Claude Code's, shared with every other skill and
+# hook, and pointing them at a dotfiles repo (stow, chezmoi) is a normal setup —
+# the same reason arm.sh and the restore hook constrain context-cycle/ and
+# armed.d/ but let ~/.claude be a link. A link one level up therefore still gets
+# installed through; that is the stated limit of this check, not an oversight.
+for d in "$SKILL_DIR" "$CLAUDE_DIR/context-cycle"; do
+  if [ -L "$d" ]; then
+    die "$d is a symlink, not a directory.
+  Refusing to install into it: the files would be written into the link's target,
+  overwriting whatever lives there. If you linked this at a local checkout on
+  purpose, remove the link (or point CLAUDE_CONFIG_DIR somewhere else) and re-run."
+  fi
+done
+
 mkdir -p "$SKILL_DIR" "$HOOKS_DIR" "$CLAUDE_DIR/context-cycle"
 
 fetch "context-cycle/SKILL.md"                "$SKILL_DIR/SKILL.md"
@@ -114,7 +151,20 @@ const hookPath = isDefault
   : (claudeDir.replace(/\\/g, '/') + '/hooks/context-cycle-restore.mjs');
 const command = `bash -c 'node ${hookPath}'`;
 
-if (fs.existsSync(settingsPath)) fs.copyFileSync(settingsPath, settingsPath + '.bak');
+// Same symlinked-.bak hazard as fetch()'s: copyFileSync follows a link at its
+// destination and writes settings.json's contents into the link's target.
+// settings.json ITSELF is allowed to be a link — pointing it at a dotfiles repo
+// is a normal setup and writing through it is what the user asked for — but
+// nothing legitimately pre-creates settings.json.bak as a link.
+if (fs.existsSync(settingsPath)) {
+  let bakLink = false;
+  try { bakLink = fs.lstatSync(settingsPath + '.bak').isSymbolicLink(); } catch (e) { /* absent */ }
+  if (bakLink) {
+    console.error('  settings.json.bak is a symlink — refusing to back up through it. Delete it and re-run.');
+    process.exit(1);
+  }
+  fs.copyFileSync(settingsPath, settingsPath + '.bak');
+}
 s.hooks.SessionStart.push({ hooks: [{ type: 'command', command }] });
 fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2) + '\n');
 console.log('  settings: SessionStart hook added' + (fs.existsSync(settingsPath + '.bak') ? ' (backup: settings.json.bak)' : ''));

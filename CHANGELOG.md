@@ -6,14 +6,26 @@ CI, and an installer that no longer eats your local edits.
 
 - **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
   push and pull request. Nothing ran it before except a human remembering to.
-- **`install.sh` refuses to install through a symlinked destination.** `cp` resolves
-  a link in both directions: the new backup step would copy the link *target's*
-  contents out to a predictable `.bak` path, and the install itself would write the
-  shipped file straight through the link into that target — the second of which the
-  bare `cp` had been doing all along. Both reproduced. The installer now stops with
-  a message naming the link, rather than unlinking it silently: pointing an
-  installed file at a local checkout is a real dev setup, and quietly replacing the
-  link with a copy would break it with no way to notice.
+- **`install.sh` refuses to install through a symlink — at the file, at its `.bak`,
+  or at the directory above it.** `cp` resolves a link in both directions: the new
+  backup step would copy the link *target's* contents out to a predictable `.bak`
+  path, and the install itself would write the shipped file straight through the
+  link into that target — the second of which the bare `cp` had been doing all
+  along. The `.bak` name needs the same guard and is the worse of the two: `cp`
+  follows a link at its *destination* as well, so a link pre-placed at the entirely
+  predictable `<file>.bak` makes the backup write the installed file's current
+  contents into whatever it points at — and that branch fires on every upgrade
+  where the installed file differs, not on some rare edge case. `settings.json.bak`
+  had the identical hazard via node's `copyFileSync`. And because `[ -L ]` on a file
+  cannot see a link on the path *leading* to it — `mkdir -p` resolves a symlinked
+  directory and succeeds — the two directories this tool creates
+  (`skills/context-cycle/`, `context-cycle/`) are now checked before they are made.
+  All four reproduced. The installer stops with a message naming the link rather
+  than unlinking it silently: pointing an installed file at a local checkout is a
+  real dev setup, and quietly replacing the link with a copy would break it with no
+  way to notice. `~/.claude` itself, `~/.claude/skills` and `~/.claude/hooks` are
+  deliberately still allowed to be links — they are Claude Code's, shared with every
+  other skill, and pointing them at a dotfiles repo is normal.
 - **`install.sh` backs up a modified file before overwriting it.** It used to `cp`
   straight over an installed copy — no diff, no prompt, no way back — which silently
   reverted anyone who had patched their install. Now a destination that differs from
