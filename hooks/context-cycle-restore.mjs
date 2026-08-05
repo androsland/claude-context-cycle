@@ -25,13 +25,19 @@
 // Only arm flags are ever deleted here. Checkpoint files are append-only: this
 // hook never writes, moves, or removes one.
 
-import { readFileSync, readdirSync, statSync, lstatSync, existsSync, unlinkSync, writeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const TTL_SECONDS = 3600; // a flag older than this is stale -> ignored + cleared
 
-const claudeDir = (process.env.CLAUDE_CONFIG_DIR || '').trim() || join(homedir(), '.claude');
+// Resolve the config root to its physical path before building anything under it.
+// ~/.claude is often a symlink into a dotfiles repo (stow, chezmoi) — legitimate,
+// and deliberately still allowed. The directories BELOW it are the ones that must
+// be real; see armDirUsable().
+const claudeDirRaw = (process.env.CLAUDE_CONFIG_DIR || '').trim() || join(homedir(), '.claude');
+let claudeDir = claudeDirRaw;
+try { claudeDir = realpathSync(claudeDirRaw); } catch { /* not created yet */ }
 const stateDir = join(claudeDir, 'context-cycle');
 const armDir = join(stateDir, 'armed.d');
 const legacyArmedPath = join(stateDir, 'armed.json');
@@ -73,20 +79,26 @@ function parseCheckpoint(md) {
   return { title, nextStep };
 }
 
-// armed.d must be a real directory. readdirSync + unlinkSync(join(armDir, name))
-// resolve through a symlink, so a symlinked armed.d would make this hook enumerate
-// and DELETE *.json out of whatever directory the link points at. Treat that as
-// "no per-session arms" and never read or unlink through it. (uninstall.sh's
-// `rm -rf` on the same path is safe by contrast — rm removes a symlink without
+// readdirSync + unlinkSync(join(armDir, name)) resolve through a symlink, so a
+// link swapped in for one of these directories makes this hook enumerate and
+// DELETE *.json out of whatever it points at. Checking only armed.d is not enough:
+// the OS resolves a symlinked PARENT during traversal, after which armed.d itself
+// is a perfectly real directory and the leaf check passes. So both levels below
+// the (already resolved) config root must be real directories. Anything else is
+// treated as "no arms" — never read through, never unlinked through.
+// (uninstall.sh's `rm -rf` is safe by contrast: rm removes a symlink without
 // recursing into its target.)
-function armDirUsable() {
-  try { return lstatSync(armDir).isDirectory(); } catch { return false; }
+function realDir(p) {
+  try { return lstatSync(p).isDirectory(); } catch { return false; }
 }
+function stateDirUsable() { return realDir(stateDir); }
+function armDirUsable() { return realDir(stateDir) && realDir(armDir); }
 
 // Every arm-flag file on disk: the per-(project, session) files plus a legacy
 // single-slot armed.json if one is still lying around.
 function armPaths() {
   const out = [];
+  if (!stateDirUsable()) return out;
   if (existsSync(legacyArmedPath)) out.push(legacyArmedPath);
   if (!armDirUsable()) return out;
   try {

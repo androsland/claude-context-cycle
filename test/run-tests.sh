@@ -227,6 +227,43 @@ eq "quotes/backslashes in project path still emit valid JSON" "ok" \
       catch(e){console.log("INVALID: "+e.message)}' "$ARMD")"
 rm -f "$ARMD"/*.json
 
+echo "=== 15. Symlinked ANCESTOR of armed.d (leaf-only checks miss this) ==="
+# A link at context-cycle/ resolves during traversal, so armed.d inside the target
+# is a real directory and a leaf-only guard passes — the sweep then deletes out of
+# the attacker's directory. Both levels below the config root must be checked.
+R15="$ROOT/anc"; mkdir -p "$R15/cfg" "$R15/evil/armed.d"
+touch -d '3 hours ago' "$R15/evil/armed.d/precious.json"
+ln -s "$R15/evil" "$R15/cfg/context-cycle"
+P15="$ROOT/p15"; mkproj "$P15"; C15="$ROOT/p15.md"; mkcp "$C15" "ANC"
+eq "arm.sh refuses a symlinked context-cycle/ -> rc 1" "1" \
+   "$( (cd "$P15" && CLAUDE_CONFIG_DIR="$R15/cfg" bash "$ARM" "$C15" >/dev/null 2>&1); echo $? )"
+# Assert by NAME, not by count: the pre-fix arm.sh reaped the stale precious.json
+# via its own `find -delete` and wrote a flag in its place, leaving the count at 1.
+eq "no flag written into the link target" "precious.json" \
+   "$(ls -1 "$R15/evil/armed.d" | tr '\n' ' ' | sed 's/ *$//')"
+CLAUDE_CONFIG_DIR="$R15/cfg" node "$HOOK" >/dev/null 2>&1 <<EOF
+{"source":"clear","cwd":"$P15"}
+EOF
+eq "hook does not delete through a symlinked ancestor" "present" \
+   "$([ -e "$R15/evil/armed.d/precious.json" ] && echo present || echo GONE)"
+
+echo "=== 16. A symlinked CONFIG ROOT stays supported (stow/chezmoi dotfiles) ==="
+# The guard above must not fire here: symlinking ~/.claude into a dotfiles repo is
+# a normal setup, and refusing it would break the tool for those users.
+R16="$ROOT/dot"; mkdir -p "$R16/real-claude"; ln -s "$R16/real-claude" "$R16/claude-link"
+P16="$ROOT/p16"; mkproj "$P16"; C16="$ROOT/p16.md"; mkcp "$C16" "DOTFILES"
+eq "arm.sh accepts a symlinked config root -> rc 0" "0" \
+   "$( (cd "$P16" && CLAUDE_CONFIG_DIR="$R16/claude-link" CLAUDE_CODE_SESSION_ID=s16 bash "$ARM" "$C16" >/dev/null 2>&1); echo $? )"
+eq "flag landed in the real dir" "1" \
+   "$(ls -1 "$R16/real-claude/context-cycle/armed.d"/*.json 2>/dev/null | wc -l)"
+OUT16=$(CLAUDE_CONFIG_DIR="$R16/claude-link" node "$HOOK" <<EOF
+{"source":"clear","cwd":"$P16"}
+EOF
+)
+eq "restore still fires through a symlinked config root" \
+   '✓ Restored: "DOTFILES" · next: finish DOTFILES (testbr)' \
+   "$([ -n "$OUT16" ] && printf '%s' "$OUT16" | jsonf banner)"
+
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

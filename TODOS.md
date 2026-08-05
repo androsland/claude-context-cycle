@@ -19,7 +19,7 @@
   (bash + node + git), so a minimal GitHub Actions workflow on push/PR would catch a
   regression in the arm/restore contract before it ships. Nothing runs it today
   except a human remembering to. (concurrency fix, 2026-08-05)
-- **`test/run-tests.sh` uses GNU-only `touch -d '3 hours ago'`** (groups 6 and 14) to
+- **`test/run-tests.sh` uses GNU-only `touch -d '3 hours ago'`** (groups 6, 14, 15) to
   age a file past the TTL. BSD `touch` on macOS has no `-d` in that form, so the
   suite's staleness assertions will not run there as written. Needs a portable
   helper (`touch -t` with a computed stamp, or a node one-liner using `utimesSync`).

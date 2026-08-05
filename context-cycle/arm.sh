@@ -21,18 +21,33 @@
 set -euo pipefail
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-STATE_DIR="$CLAUDE_DIR/context-cycle"
-ARM_DIR="$STATE_DIR/armed.d"
 
 die() { printf 'arm.sh: %s\n' "$1" >&2; exit 1; }
 
-# armed.d must be a real directory. If it has been swapped for a symlink, both the
-# flag write and the sweep below would act on the link's target instead. GNU find
-# does not descend into a symlinked start point, so the sweep is safe in practice —
-# but that is find's default, not a guarantee this script should lean on, and the
-# hook's readdir/unlink sweep genuinely does follow it.
-[ -L "$ARM_DIR" ] && die "$ARM_DIR is a symlink, not a directory.
-  Refusing to write arm flags through it. Remove it and re-run."
+# Resolve the config root to its physical path BEFORE building any path under it.
+# `~/.claude` is very often a symlink into a dotfiles repo (stow, chezmoi, a bare
+# git checkout) — that is a legitimate setup and must keep working, so the root
+# itself is deliberately allowed to be a link.
+mkdir -p "$CLAUDE_DIR" 2>/dev/null || true
+CLAUDE_DIR_P=$(cd "$CLAUDE_DIR" 2>/dev/null && pwd -P) || CLAUDE_DIR_P=""
+[ -n "$CLAUDE_DIR_P" ] || CLAUDE_DIR_P="$CLAUDE_DIR"
+
+STATE_DIR="$CLAUDE_DIR_P/context-cycle"
+ARM_DIR="$STATE_DIR/armed.d"
+
+# What must NOT be a symlink is anything the tool creates below that root. armed.d
+# is enumerated and unlink-swept by the restore hook, so a link swapped in at
+# EITHER level makes the sweep delete *.json out of the link's target instead —
+# checking only the leaf misses it, because the OS resolves a symlinked parent
+# during traversal and the leaf check then sees a perfectly real directory.
+for d in "$STATE_DIR" "$ARM_DIR"; do
+  [ -L "$d" ] && die "$d is a symlink, not a directory.
+  Refusing to write arm flags through it: the restore hook enumerates and deletes
+  *.json in that directory, which through a link means deleting someone else's
+  files. Remove the link and re-run.
+  (Note: \$CLAUDE_CONFIG_DIR / ~/.claude itself MAY be a symlink — that is a
+  normal dotfiles setup. Only context-cycle/ and armed.d/ must be real.)"
+done
 mkdir -p "$ARM_DIR"
 
 CP="${1:-}"
