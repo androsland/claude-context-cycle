@@ -70,6 +70,17 @@ fetch() { # $1 = repo-relative path, $2 = destination
   fi
 
   if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
+    # Checked again, immediately before the write. The check above runs before the
+    # download, and on the `curl | bash` path a network fetch sits in between — which
+    # stretches the check-then-use window from a few local subprocess calls to however
+    # long the transfer takes. Re-checking here narrows it back; it does not close it,
+    # because bash has no way to open a path with O_NOFOLLOW. Same pattern, and the
+    # same stated limit, as arm.sh's second symlink check before its flag write.
+    if [ -L "$dest.bak" ]; then
+      if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+      die "$dest.bak became a symlink while $rel was downloading. Refusing to back up
+  through it — delete it and re-run."
+    fi
     if ! cp "$dest" "$dest.bak"; then
       if [ -n "$tmp" ]; then rm -f "$tmp"; fi
       die "could not back up $dest — refusing to overwrite it."

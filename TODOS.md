@@ -69,6 +69,23 @@
   BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
   (security review, 2026-08-05)
 
+- **`install.sh`'s `.bak` symlink guard is check-then-use, like `arm.sh`'s.** The
+  `[ -L "$dest.bak" ]` check runs before the file is fetched, and on the `curl | bash`
+  path a network download sits between the check and the `cp` — stretching the window
+  from a few local subprocess calls to however long the transfer takes. A second check
+  immediately before the `cp` narrows it back to the local case (installed, mirroring
+  `arm.sh:140-146`), but bash cannot close it: there is no way to open a path with
+  `O_NOFOLLOW`, so a check and the subsequent `cp` are always two operations. Closing
+  it properly means the same move as the `arm.sh` item above — doing the write from
+  node, or a helper that can hold a directory fd. Same threat-model bound as every
+  other item in this section: anyone who can plant that link can write
+  `~/.claude/hooks/*.mjs` and get code execution outright. Note the second check has
+  no dedicated assertion — group 18's `.bak` refusal is caught by the *first* check,
+  and staging a link that appears only mid-download is not something the suite can do
+  deterministically. It is correct by inspection and shares the first check's code
+  path, which is weaker evidence than the rest of group 18 carries.
+  (security review, 2026-08-06)
+
 - **`install.sh` still installs through a symlink one level above what it guards.**
   It refuses a link at an installed file, at that file's `.bak`, and at the two
   directories it creates (`skills/context-cycle/`, `context-cycle/`) — but not at
