@@ -1,34 +1,27 @@
 # TODOS
 
-## Installer
-
-- **`install.sh` overwrites `~/.claude` copies with a bare `cp`, with no check for
-  local modifications.** `fetch()` (install.sh:27) copies straight over
-  `$SKILL_DIR/SKILL.md`, `$SKILL_DIR/arm.sh`, and
-  `$HOOKS_DIR/context-cycle-restore.mjs`. Anyone who patched an installed copy —
-  which is exactly how the v1.1.0 concurrency fix was developed and tested — has it
-  silently reverted by the next `install.sh` run, with no diff, no prompt, and no
-  backup. Contrast with the settings.json merge a few lines below, which *does* back
-  up before writing. Options: `cp` to `<file>.bak` first (matching the settings
-  behaviour and the existing `*.bak` gitignore entry), or checksum against the
-  shipped version and prompt when it differs. (concurrency fix, 2026-08-05)
-
 ## Testing
 
-- **No CI runs `test/run-tests.sh`.** The suite is in-repo and dependency-free
-  (bash + node + git), so a minimal GitHub Actions workflow on push/PR would catch a
-  regression in the arm/restore contract before it ships. Nothing runs it today
-  except a human remembering to. (concurrency fix, 2026-08-05)
-- **`test/run-tests.sh` uses GNU-only `touch -d '3 hours ago'`** (groups 6, 14, 15) to
-  age a file past the TTL. BSD `touch` on macOS has no `-d` in that form, so the
-  suite's staleness assertions will not run there as written. Needs a portable
-  helper (`touch -t` with a computed stamp, or a node one-liner using `utimesSync`).
-  (concurrency fix, 2026-08-05)
-- **Windows path handling is reasoned about but not exercised.** `arm.sh`'s
-  `cygpath -m` / `/c/` → `C:/` conversion and the hook's `norm()` + `winPath()`
-  win32 branch are only covered on POSIX, where the win32 branch is dead code. A
-  Git Bash job in CI (or a `process.platform` shim in the suite) would close it.
-  (concurrency fix, 2026-08-05)
+- **The symlink-dependent groups (14a, 15, 16, 17) never run on Windows.** Git Bash
+  turns `ln -s` into a copy unless `MSYS=winsymlinks:nativestrict` is set, which
+  needs Developer Mode or admin, so the suite's capability probe skips those four
+  groups there — reported by name, but skipped. The hostile-state guarding in
+  `arm.sh` and the hook is therefore verified on Linux and macOS only; MSYS symlink
+  semantics (does `lstat` on a Windows junction report a link?) are still untested.
+  Closing it means a second Windows job with `nativestrict` enabled, which tests a
+  configuration most users do not have — arguably the wrong thing to assert on.
+  Group 14b is skipped there for a permanent reason, not a fixable one: NTFS cannot
+  hold a filename containing `"` or a control byte. (CI work, 2026-08-05)
+- **The `/a/notes.md` path-rewrite case is not reachable from CI.** The fix stops
+  `arm.sh` mangling a checkpoint under a single-letter top-level directory into a
+  Windows drive path, but asserting it needs a directory at the filesystem root,
+  which the test suite cannot create without root and must not require. The
+  regression guard that did land ("checkpoint stored verbatim") passes against the
+  *pre-fix* code too — it locks the behaviour in going forward, it does not prove
+  the fix. The mangling itself was reproduced directly (`sed -E
+  's#^/([a-zA-Z])/#\U\1:/#'` on `/a/foo.md` yields `A:/foo.md` on GNU sed 4.8) and
+  the consequence follows from group 12: an unreadable checkpoint path is treated
+  as a vanished one and silently restores nothing. (CI work, 2026-08-05)
 
 ## Security
 
@@ -71,12 +64,13 @@
   BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
   (security review, 2026-08-05)
 
-- **Portability of the symlink hardening is verified on GNU/busybox only.**
-  `mktemp`'s `O_EXCL` creation and `find`'s non-following `-P` default were tested
-  against GNU coreutils 8.32 / findutils 4.8.0 and busybox 1.30.1. BSD/macOS `mktemp`
-  and `find`, and Git Bash's MSYS2 builds, are documented to behave identically but
-  were not executed. Folds into the CI item above — a macOS and a Git Bash job would
-  settle both. (security review, 2026-08-05)
+- **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
+  macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
+  non-following `-P` default against the real hostile-state groups, so those are no
+  longer inferred from docs. Git Bash runs the suite but *skips* those groups (see
+  Testing above), so MSYS2's `mktemp` and `find` remain unexercised on the paths
+  that matter. (security review, 2026-08-05; partly closed by the CI work,
+  2026-08-05)
 
 ## Restore semantics
 
@@ -101,3 +95,18 @@
   `armed.json` with `armed.d/<project-hash>-<session-id>.json`, deleted the
   `.pending-file` fallback, made the hook fail closed on an unreadable payload, and
   added `test/run-tests.sh` (52 assertions). Shipped in v1.1.0. (2026-08-05)
+- **CI runs the suite on ubuntu, macOS and Git Bash** on every push and PR
+  (`.github/workflows/test.yml`), with the toolchain implementations printed so a
+  platform-only failure is diagnosable from the log. (2026-08-05)
+- **`install.sh` backs up a locally modified file before overwriting it.** Differing
+  destinations are copied to `<file>.bak` and named in the output; unchanged files
+  are skipped so a no-op reinstall creates no backups, and each file keeps exactly
+  one `.bak` so they cannot accumulate. Covered by test group 18, which also pins
+  installer idempotence. (2026-08-05)
+- **`test/run-tests.sh` no longer needs GNU tools.** `touch -d '3 hours ago'` is now
+  a node `utimesSync` helper, and payload/config paths are converted to native form
+  on Windows the way Claude Code sends them. (2026-08-05)
+- **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
+  `/c/` → `C:/` conversion ran unconditionally, so `/a/notes.md` was stored as
+  `A:/notes.md` and the restore silently did nothing; it is now gated on actually
+  running under MSYS/Cygwin. (2026-08-05)
