@@ -62,9 +62,21 @@
   write into the node hook or a helper that can hold a directory fd. Same threat-model
   bound as the arm-flag-trust item above — write access to `~/.claude/context-cycle/`
   usually implies write access to `~/.claude/hooks/*.mjs`, which is strictly stronger.
+  The `rm -f "$DEST"; cp -f "$TMP" "$DEST"` fallback (arm.sh:169) has a smaller
+  instance of the same window — `$DEST` briefly does not exist between the two — but
+  it replaces a *deterministic* symlink-follow with one an attacker must win a
+  footrace to hit, and only on the branch taken when `mv` has already failed.
   Note the TTL sweep is *not* part of this: `find` does not follow a symlinked start
-  point (POSIX default `-P`, verified on GNU findutils 4.8.0), so a swapped link makes
-  it a no-op. (security review, 2026-08-05)
+  point (POSIX default `-P`, verified on GNU findutils 4.8.0 and busybox find 1.30.1;
+  BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
+  (security review, 2026-08-05)
+
+- **Portability of the symlink hardening is verified on GNU/busybox only.**
+  `mktemp`'s `O_EXCL` creation and `find`'s non-following `-P` default were tested
+  against GNU coreutils 8.32 / findutils 4.8.0 and busybox 1.30.1. BSD/macOS `mktemp`
+  and `find`, and Git Bash's MSYS2 builds, are documented to behave identically but
+  were not executed. Folds into the CI item above — a macOS and a Git Bash job would
+  settle both. (security review, 2026-08-05)
 
 ## Restore semantics
 
