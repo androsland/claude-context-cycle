@@ -20,14 +20,30 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || die "node is required (the restore hook runs on Node.js). Install Node 18+ and retry."
 command -v bash >/dev/null 2>&1 || die "bash is required."
 
-# Copy a repo file to a destination — from the local clone if present, else download.
+BACKED_UP=()
+
+# Copy a repo file to a destination — from the local clone if present, else
+# download. An installed file that differs from the shipped one is backed up
+# first: reinstalling used to revert a locally patched copy with no diff, no
+# prompt and no way back, which is exactly how this tool's own fixes were
+# developed and tested. Matches the settings.json backup below — ONE .bak per
+# file, overwritten each run, so backups cannot pile up generation by generation.
+# Unchanged files are left alone entirely, so a no-op reinstall writes no .bak.
 fetch() { # $1 = repo-relative path, $2 = destination
-  local rel="$1" dest="$2"
+  local rel="$1" dest="$2" src tmp=""
   if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$rel" ]; then
-    cp "$SELF_DIR/$rel" "$dest"
+    src="$SELF_DIR/$rel"
   else
-    curl -fsSL "$REPO_RAW/$rel" -o "$dest" || die "failed to download $rel"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/context-cycle.XXXXXX")" || die "could not create a temp file"
+    curl -fsSL "$REPO_RAW/$rel" -o "$tmp" || { rm -f "$tmp"; die "failed to download $rel"; }
+    src="$tmp"
   fi
+  if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
+    cp "$dest" "$dest.bak" && BACKED_UP+=("$dest.bak")
+  fi
+  cp "$src" "$dest"
+  [ -n "$tmp" ] && rm -f "$tmp"
+  return 0   # the line above is false when tmp is unset; do not let that abort -e
 }
 
 echo "Installing context-cycle into: $CLAUDE_DIR"
@@ -39,6 +55,12 @@ fetch "hooks/context-cycle-restore.mjs"       "$HOOKS_DIR/context-cycle-restore.
 chmod +x "$SKILL_DIR/arm.sh" "$HOOKS_DIR/context-cycle-restore.mjs" 2>/dev/null || true
 say "skill  -> $SKILL_DIR/"
 say "hook   -> $HOOKS_DIR/context-cycle-restore.mjs"
+
+if [ "${#BACKED_UP[@]}" -gt 0 ]; then
+  say "note: these files differed from the shipped version and were overwritten."
+  say "      your copy is preserved alongside each one:"
+  for b in "${BACKED_UP[@]}"; do say "      $b"; done
+fi
 
 # Merge the SessionStart hook into settings.json (idempotent; backs up first).
 CLAUDE_DIR="$CLAUDE_DIR" SETTINGS="$SETTINGS" node - <<'NODE'
