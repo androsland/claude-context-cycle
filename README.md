@@ -85,10 +85,15 @@ where `/context-restore` and `/context-save list` can find them too.
 
 ## How it works
 
-- **The armed flag is the gate.** `/context-cycle` writes
-  `~/.claude/context-cycle/armed.json` recording the checkpoint path, branch, the
-  project's repo root, and a timestamp. The hook does nothing unless that flag
+- **The armed flag is the gate.** `/context-cycle` writes an arm flag under
+  `~/.claude/context-cycle/armed.d/` recording the checkpoint path, branch, the
+  project's repo root, and a timestamp. The hook does nothing unless a flag
   exists — so a **plain `/clear` never restores anything**.
+- **One flag per (project, session).** The filename is
+  `<project-hash>-<session-id>.json`, so two sessions cycling at the same time
+  can't overwrite each other's pending restore. Re-running `/context-cycle` in
+  the *same* session replaces that session's own flag (newest checkpoint wins);
+  a *different* session adds its own.
 - **SessionStart hook.** After a `/clear`, Claude Code fires a `SessionStart` hook
   with `source: "clear"`. The hook checks the flag and, if valid, injects the saved
   checkpoint, then deletes the flag. It uses **two output channels**, because `/clear`
@@ -103,11 +108,28 @@ where `/context-restore` and `/context-save list` can find them too.
   The output is written with synchronous `writeSync(1, …)`: `process.stdout.write`
   followed by `process.exit()` can truncate a multi-KB checkpoint on the pipe and
   silently drop the whole restore.
-- **One-shot.** Fires once, then disarms.
-- **Project-scoped.** The flag records the repo root it was armed in. A `/clear` in
+- **One-shot.** Consumes exactly one flag, then leaves the rest armed.
+- **Project-scoped.** Each flag records the repo root it was armed in. A `/clear` in
   a *different* project is ignored and **leaves the flag armed** for the right one.
+  A clear from a *subdirectory* of the armed repo still counts — but not from the
+  root of a nested repo or submodule, which is a different project.
 - **Self-expiring.** A flag older than 1 hour is treated as stale and cleared, so a
-  much-later `/clear` won't surprise-restore.
+  much-later `/clear` won't surprise-restore. Expired flags are also swept on every
+  session start, so `armed.d/` can't grow without bound.
+- **Fails closed.** `/clear` mints a brand-new session id and the hook payload carries
+  no link back to the pre-clear session, so `source: "clear"` is the only evidence a
+  clear actually happened. A missing or unparseable payload restores **nothing** —
+  firing blind would burn an arm and inject a checkpoint nobody asked for.
+
+### Known limitation
+
+When **two sessions in the same project** are both armed, the hook consumes the
+**oldest** matching flag. That pairs correctly when the sessions clear in the order
+they armed, and mis-pairs when they don't — nothing in the `SessionStart` payload
+identifies which session is clearing, so the hook cannot do better. This is why the
+clear-time banner names the checkpoint it restored (`✓ Restored: "…"`): a mis-pair is
+visible immediately rather than silent. Re-run `/context-cycle` if the banner isn't
+the checkpoint you expected. Sessions in *different* projects are never affected.
 
 ### Where checkpoints live
 
@@ -127,7 +149,7 @@ directory instead, for compatibility with its `/context-restore`.)
 | `~/.claude/skills/context-cycle/` | the skill (`SKILL.md`, `arm.sh`) |
 | `~/.claude/hooks/context-cycle-restore.mjs` | the SessionStart restore hook |
 | `~/.claude/settings.json` | one added `SessionStart` hook entry |
-| `~/.claude/context-cycle/` | the armed flag + saved checkpoints |
+| `~/.claude/context-cycle/` | arm flags (`armed.d/`) + saved checkpoints |
 
 It never modifies your code, and it doesn't phone home.
 
@@ -140,6 +162,21 @@ curl -fsSL https://raw.githubusercontent.com/androsland/claude-context-cycle/mai
 
 Removes the files and the settings entry (backing up `settings.json`). Saved
 checkpoints are kept — delete them yourself if you want them gone.
+
+## Tests
+
+```bash
+bash test/run-tests.sh
+```
+
+68 assertions across 17 groups — concurrent arms, project scoping, TTL sweeping,
+`arm.sh` argument validation, fail-closed payload handling, legacy-flag migration,
+full multi-KB payload delivery, a hostile state dir (symlinked `armed.d` or its
+parent, a symlink pre-placed on the flag path, control characters in paths), and a
+symlinked config root, which must keep working. It runs the repo's own `arm.sh` and hook against
+a throwaway `CLAUDE_CONFIG_DIR` in a temp dir, so it never reads or writes your real
+`~/.claude` and never touches an installed copy. Needs bash, node, and git — nothing
+else.
 
 ## FAQ
 

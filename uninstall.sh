@@ -11,6 +11,10 @@ SETTINGS="$CLAUDE_DIR/settings.json"
 echo "Removing context-cycle from: $CLAUDE_DIR"
 rm -rf "$SKILL_DIR"
 rm -f  "$HOOK"
+# Arm flags only. `armed.d/` is the current layout; `armed.json` and
+# `.pending-file` are pre-1.1 leftovers, removed here so an upgrade-then-uninstall
+# doesn't strand them. Checkpoints live in checkpoints/ and are deliberately kept.
+rm -rf "$CLAUDE_DIR/context-cycle/armed.d"
 rm -f  "$CLAUDE_DIR/context-cycle/armed.json" "$CLAUDE_DIR/context-cycle/.pending-file"
 echo "  removed skill + hook files"
 
