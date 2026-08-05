@@ -221,8 +221,18 @@ function canon(p) {
 // a 64-iteration version; blocked at 63. Unbounded is safe: `p` loses at least one
 // character per pass and the loop stops at the first component, so it terminates in
 // at most one iteration per separator in the path.
+//
+// The backslash collapse is gated on win32 for the same reason norm()'s is, and here
+// it is not a theoretical tidy-up: on POSIX a backslash is an ordinary filename
+// character, so collapsing it splits one directory name into two, the walk then stats
+// `.git` under paths that do not exist, finds nothing, and returns '' — which the
+// caller reads as "no repo above, benign alias, allow". Reproduced: a repo literally
+// named `evil\repo` holding a symlink to the armed project restored through it while
+// the same shape named `evilrepo` was blocked.
 function rawEnclosingRepo(rawPath) {
-  let p = String(rawPath).replace(/\\/g, '/').replace(/\/+$/, '');
+  let p = String(rawPath);
+  if (IS_WIN) p = p.replace(/\\/g, '/');
+  p = p.replace(/\/+$/, '');
   for (;;) {
     const cut = p.lastIndexOf('/');
     if (cut <= 0) return '';

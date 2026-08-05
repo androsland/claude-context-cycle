@@ -71,6 +71,14 @@ CASE_SENSITIVE=0
 mkdir -p "$ROOT/.CaseProbe" 2>/dev/null
 [ -d "$ROOT/.caseprobe" ] || CASE_SENSITIVE=1
 rm -rf "$ROOT/.CaseProbe" "$ROOT/.caseprobe" 2>/dev/null
+# Whether a backslash can be an ordinary character in a directory name. It can on
+# POSIX and cannot on Windows, where it is the separator — which is exactly why the
+# hook must only collapse it there. Separate from CAN_ODD_NAMES: that probes '"' and
+# control bytes, and a volume could accept one set and not the other.
+CAN_BACKSLASH_NAME=0
+mkdir -p "$ROOT/.bs\\probe" 2>/dev/null
+[ -d "$ROOT/.bs\\probe" ] && CAN_BACKSLASH_NAME=1
+rm -rf "$ROOT/.bs\\probe" 2>/dev/null
 
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.
@@ -83,9 +91,15 @@ jsonf() { node -e '
   });' "$1"; }
 
 # Restore banner reported by a /clear in $1 (cwd). '' when the hook stays silent.
+# The payload is built with JSON.stringify, not printf, because a cwd containing a
+# backslash or a quote is not JSON-safe as a raw substitution — `\r` in a directory
+# name becomes a carriage return and the hook sees a path that does not exist. That
+# is not a hypothetical: it silently turned a real scope-check bypass into a green
+# assertion during development. Claude Code serialises the payload properly, so this
+# is also the more faithful fixture.
 clear_in() {
   local out
-  out=$(printf '{"source":"clear","cwd":"%s","session_id":"post-clear-new-uuid"}' "$(winp "$1")" | node "$HOOK")
+  out=$(node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1],session_id:"post-clear-new-uuid"}))' "$(winp "$1")" | node "$HOOK")
   [ -z "$out" ] && { echo ""; return; }
   printf '%s' "$out" | jsonf banner
 }
@@ -510,6 +524,22 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   eq "but a link with no repo above it still restores" \
      '✓ Restored: "TWOFORMS" · next: finish TWOFORMS (testbr)' "$(clear_in "$ROOT/p19-link")"
   rm -f "$ARMD"/*.json 2>/dev/null || true
+  # A backslash is an ordinary filename character on POSIX, so collapsing it to '/'
+  # splits one directory name into two: the walk then stats `.git` under paths that
+  # do not exist, finds no repo above the link, and the caller reads that as "benign
+  # alias, allow". Naming the attacking repo `evil\repo` is the entire exploit, and
+  # it restored until the collapse was gated on win32.
+  if [ "$CAN_BACKSLASH_NAME" = 1 ]; then
+    BSR="$ROOT/bs\\repo"; mkproj "$BSR"
+    ln -s "$P19" "$BSR/link"
+    mkcp "$C19" "TWOFORMS"
+    (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-6969 bash "$ARM" "$C19" >/dev/null 2>&1)
+    eq "a backslash in the repo name does not hide it from the walk" "" "$(clear_in "$BSR/link")"
+    eq "and that arm survives that too" "1" "$(arms)"
+    rm -f "$ARMD"/*.json 2>/dev/null || true
+  else
+    skip "group 19 backslash-in-repo-name bypass" "this filesystem cannot hold a backslash in a name"
+  fi
 else
   skip "group 19 two-path-form scope matching" "this shell/filesystem does not create real symlinks"
 fi

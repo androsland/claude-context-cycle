@@ -50,7 +50,12 @@ CI, and an installer that no longer eats your local edits.
   project A pulled A's checkpoint into a session working in B. Narrowed by the one
   thing that separates the two: what the raw path walked *through*. A `/var` alias, a
   short name, or a plain symlink to a project has no repository above it; a planted
-  link does, and it isn't the repo we landed in. Both sides are pinned by tests.
+  link does, and it isn't the repo we landed in. That walk collapses backslashes only
+  on Windows, where a backslash is a separator — doing it on POSIX, where it is an
+  ordinary filename character, split one directory name into two, so the walk looked
+  for `.git` under paths that do not exist, found no repo above the link, and allowed
+  the restore. Naming the attacking repo `evil\repo` was the whole bypass. Both sides
+  are pinned by tests.
 - **Two projects whose paths differ only in case are two projects again.** The scope
   check lowercased every path, rewrote a single-letter first component to a drive
   path, and collapsed backslashes — all unconditionally, though all three exist only

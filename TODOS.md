@@ -173,6 +173,25 @@
   comparison this PR reworked and disabled part of it. Gating on `win32` leaves
   Windows unchanged. Group 20 pins it, skipped where the filesystem cannot host two
   such directories. (2026-08-06)
+- **The test harness built its payload with `printf`, not `JSON.stringify`.**
+  `clear_in()` interpolated the cwd straight into the JSON string, so a path
+  containing a backslash or a quote produced a payload the hook could not match
+  (`evil\repo` → a carriage return mid-path). It failed in the flattering
+  direction: the assertion went green because the *fixture* was broken, not because
+  the guard held, and it hid a real scope-check bypass during development until the
+  payload was rebuilt properly. Claude Code serialises the payload, so the fixture
+  now does too. (2026-08-06)
+- **`rawEnclosingRepo()`'s backslash collapse is gated on Windows.** The aliasing
+  guard walks the raw cwd up looking for the repo a planted symlink sits in, and it
+  collapsed `\` to `/` unconditionally — the exact hazard `norm()` had just been
+  fixed for, reintroduced in the one function whose job is to read a raw path. On
+  POSIX a backslash is an ordinary filename character, so the collapse split one
+  directory name into two, the walk stat'd `.git` under paths that do not exist, and
+  returned "no repo above" — which the caller reads as allow. A repo named
+  `evil\repo` holding a symlink to the armed project restored through it while the
+  identical shape named `evilrepo` was blocked; reproduced both ways, and the two
+  new group 19 assertions are the only ones that fail against the preceding commit.
+  (security review, 2026-08-06)
 - **The hook matches a project across path forms.** `arm.cwd` is git's *physical*
   path; the payload `cwd` may be *logical*. `scopeAllows()` now canonicalizes both
   before comparing, so `/private/var/…` vs `/var/…` on macOS and 8.3 vs long names
