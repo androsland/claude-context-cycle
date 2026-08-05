@@ -44,14 +44,32 @@ const legacyArmedPath = join(stateDir, 'armed.json');
 
 function noop() { process.exit(0); }                 // no stdout => nothing injected
 
-// Normalize a path for cross-tool comparison: backslashes -> '/', MSYS /c/ -> c:/,
-// drop trailing slash, lowercase (Windows filesystem is case-insensitive).
+// Normalize a path for cross-tool comparison. Everything except dropping a trailing
+// slash is a Windows accommodation and is gated on actually running there.
+//
+// Ungated, all three transforms merge paths that are genuinely different on a
+// case-sensitive filesystem, and `scopeAllows()` then treats two unrelated projects
+// as one: lowercasing makes ~/Proj and ~/proj compare equal, the MSYS rewrite makes
+// /a/x and /A/x both become 'a:/x', and collapsing backslashes makes 'a\b' and 'a/b'
+// equal where a backslash is a legal filename character. Reproduced: an arm taken in
+// ~/Proj was consumed by a /clear in a separate ~/proj repo with no symlink involved.
+// It also silently defeated the aliasing guard below, because folding case made the
+// raw and canonical forms compare equal, so the divergence branch never ran.
+//
+// Pre-existing (identical on main) rather than introduced by the canonicalization
+// work, but it lives in the same comparison and disables part of it, so it is fixed
+// here. Gating on win32 leaves Windows byte-for-byte unchanged.
+const IS_WIN = process.platform === 'win32';
 function norm(p) {
   if (!p) return '';
-  let s = String(p).replace(/\\/g, '/');
-  const m = /^\/([a-zA-Z])\/(.*)$/.exec(s);
-  if (m) s = m[1] + ':/' + m[2];
-  return s.replace(/\/+$/, '').toLowerCase();
+  let s = String(p);
+  if (IS_WIN) {
+    s = s.replace(/\\/g, '/');
+    const m = /^\/([a-zA-Z])\/(.*)$/.exec(s);
+    if (m) s = m[1] + ':/' + m[2];
+  }
+  s = s.replace(/\/+$/, '');
+  return IS_WIN ? s.toLowerCase() : s;
 }
 
 // Clamp to n chars with an ellipsis (for the one-line banner).

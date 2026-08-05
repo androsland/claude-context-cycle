@@ -51,6 +51,15 @@ CI, and an installer that no longer eats your local edits.
   thing that separates the two: what the raw path walked *through*. A `/var` alias, a
   short name, or a plain symlink to a project has no repository above it; a planted
   link does, and it isn't the repo we landed in. Both sides are pinned by tests.
+- **Two projects whose paths differ only in case are two projects again.** The scope
+  check lowercased every path, rewrote a single-letter first component to a drive
+  path, and collapsed backslashes — all unconditionally, though all three exist only
+  to make Windows paths compare correctly. On Linux, or a case-sensitive macOS volume,
+  that merged genuinely different directories: an arm taken in `~/Proj` was consumed
+  by a `/clear` in a separate `~/proj`, with no symlink involved. It also quietly
+  defeated the symlink-aliasing guard above, since folding case made the raw and
+  resolved forms compare equal so that check never ran. Now gated on actually running
+  on Windows, where behaviour is unchanged.
 - **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
   `/c/…` → `C:/…` conversion ran unconditionally, so a checkpoint under any
   single-letter top-level directory (`/a/notes.md`) was stored as `A:/notes.md` — a

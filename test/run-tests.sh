@@ -64,6 +64,13 @@ CAN_ODD_NAMES=0
 ODDPROBE="$ROOT/$(printf 'o\vd"d')"
 : > "$ODDPROBE" 2>/dev/null && [ -f "$ODDPROBE" ] && CAN_ODD_NAMES=1
 rm -f "$ODDPROBE" 2>/dev/null
+# Whether two paths differing only in case are two directories or one. NTFS and the
+# default macOS volume say one, so the case-collision group cannot run there — there
+# is no second project for the arm to leak into.
+CASE_SENSITIVE=0
+mkdir -p "$ROOT/.CaseProbe" 2>/dev/null
+[ -d "$ROOT/.caseprobe" ] || CASE_SENSITIVE=1
+rm -rf "$ROOT/.CaseProbe" "$ROOT/.caseprobe" 2>/dev/null
 
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.
@@ -505,6 +512,27 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   rm -f "$ARMD"/*.json 2>/dev/null || true
 else
   skip "group 19 two-path-form scope matching" "this shell/filesystem does not create real symlinks"
+fi
+
+echo "=== 20. Two projects differing only in case are two projects ==="
+# norm() used to lowercase every path unconditionally, on the theory that the
+# filesystem is case-insensitive — true on Windows, false on Linux and on a
+# case-sensitive macOS volume. There it merged two unrelated repos into one, so an
+# arm taken in Proj was consumed by a /clear in proj, with no symlink anywhere. It
+# also disabled the aliasing guard in group 19: folding case made the raw and
+# canonical forms compare equal, so the divergence branch never ran. Now gated on
+# win32, which leaves Windows behaviour untouched.
+if [ "$CASE_SENSITIVE" = 1 ]; then
+  PU="$ROOT/Pcase"; PL="$ROOT/pcase"; mkproj "$PU"; mkproj "$PL"
+  C20="$ROOT/p20.md"; mkcp "$C20" "CASEFOLD"
+  (cd "$PU" && CLAUDE_CODE_SESSION_ID=ff20-1010 bash "$ARM" "$C20" >/dev/null 2>&1)
+  eq "an arm in Pcase is not consumed by a clear in pcase" "" "$(clear_in "$PL")"
+  eq "and that arm is still armed" "1" "$(arms)"
+  eq "while the project it was armed in still restores" \
+     '✓ Restored: "CASEFOLD" · next: finish CASEFOLD (testbr)' "$(clear_in "$PU")"
+  rm -f "$ARMD"/*.json 2>/dev/null || true
+else
+  skip "group 20 case-collision scope matching" "this filesystem treats Proj and proj as one directory"
 fi
 
 echo

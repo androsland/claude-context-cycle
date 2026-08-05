@@ -85,19 +85,22 @@
   the user per link, which is a worse trade than stating the limit.
   (security review, 2026-08-05)
 
-- **The scope check's aliasing guard has a known false negative: `$HOME` as a git
-  repo.** Canonicalizing the clearing cwd is what makes `/var` vs `/private/var` and
+- **The scope check's aliasing guard has a known false negative: reaching your
+  project through a symlink that sits inside some *other* repo of your own.** The
+  common shape is a `$HOME` that is itself a git repo (yadm, `git init ~`), but it is
+  broader than that — any legitimate vendored or convenience symlink tracked in one of
+  your repos and pointed at the project that happens to be armed trips it the same
+  way. Canonicalizing the clearing cwd is what makes `/var` vs `/private/var` and
   Git Bash short names match, but on its own it lets *any* symlink alias into what it
   targets — a link inside repo B pointed at project A pulled A's checkpoint into a
   session working in B (reproduced; now blocked, and pinned by group 19). The check
   that separates the two is what the raw path walked *through*: a legitimate alias has
-  no repository above it, a planted link does. That misfires on one real setup —
-  someone whose `$HOME` is itself a git repo (yadm, `git init ~`) *and* who reaches
-  the project through a symlink under it gets no restore, silently. Both conditions
-  are needed, the walk only runs when canonicalization actually moved the path, and
-  the failure direction is conservative — but it is a silent non-restore, the exact
-  class of bug this PR fixes elsewhere. A louder failure needs a channel the
-  `SessionStart` hook does not have.
+  no repository above it, a planted link does. A benign link inside a repo of your own
+  is indistinguishable from a planted one by that test, so it gets no restore. Both
+  conditions are needed (an enclosing repo *and* a symlink), the walk only runs when
+  canonicalization actually moved the path, and the failure direction is conservative
+  — but it is a silent non-restore, the exact class of bug this PR fixes elsewhere.
+  A louder failure needs a channel the `SessionStart` hook does not have.
   **And it does not close aliasing in general — only the in-repo delivery vector.**
   A link with *no* repository above it (say `/tmp/foo` → the victim's project) still
   aliases through, verified. That is not closable: it is byte-for-byte the same
@@ -108,22 +111,6 @@
   against what it yields: the content injected is the user's own checkpoint, and the
   session's cwd physically *is* the armed project, so the reader is the person who
   wrote it. (security review, 2026-08-05)
-
-- **`norm()` collapses paths that are distinct on a case-sensitive filesystem.**
-  It lowercases unconditionally, so `/tmp/Proj` and `/tmp/proj` — two different
-  directories on Linux and macOS-with-a-case-sensitive-volume — compare equal in
-  `scopeAllows()`, and an arm for one is consumed by a `/clear` in the other. It also
-  rewrites a single-letter first component to a drive path unconditionally
-  (`/a/notes` → `a:/notes`), which is the same unconditional-MSYS-rewrite bug fixed
-  in `arm.sh` this PR, still present here: `/a/x` and `/A/x` collapse together.
-  Verified by running the function directly. **Pre-existing and not worsened by this
-  PR** — `norm()` is byte-identical to `main` — and it needs two projects whose paths
-  differ only in case, so it is unlikely rather than impossible. Not fixed here on
-  purpose: both behaviours exist to make Git Bash's case-insensitive, drive-lettered
-  paths compare correctly, and narrowing them to `process.platform === 'win32'` is a
-  change to the exact comparison the Windows CI job is currently the only evidence
-  for. Worth doing once that job is reliably green, with a test on both sides.
-  (security review, 2026-08-05)
 
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
@@ -175,6 +162,17 @@
   `/c/` → `C:/` conversion ran unconditionally, so `/a/notes.md` was stored as
   `A:/notes.md` and the restore silently did nothing; it is now gated on actually
   running under MSYS/Cygwin. (2026-08-05)
+- **`norm()`'s Windows accommodations are gated on Windows.** It lowercased every
+  path, rewrote a single-letter first component to a drive path, and collapsed
+  backslashes — all unconditionally. On a case-sensitive filesystem each merges paths
+  that are genuinely different, and `scopeAllows()` then treats two unrelated projects
+  as one: an arm taken in `~/Proj` was consumed by a `/clear` in a separate `~/proj`
+  repo, no symlink involved. It also silently defeated the aliasing guard, since
+  folding case made the raw and canonical forms compare equal so the divergence branch
+  never ran. Pre-existing — byte-identical on `main` — but it lives inside the
+  comparison this PR reworked and disabled part of it. Gating on `win32` leaves
+  Windows unchanged. Group 20 pins it, skipped where the filesystem cannot host two
+  such directories. (2026-08-06)
 - **The hook matches a project across path forms.** `arm.cwd` is git's *physical*
   path; the payload `cwd` may be *logical*. `scopeAllows()` now canonicalizes both
   before comparing, so `/private/var/…` vs `/var/…` on macOS and 8.3 vs long names
