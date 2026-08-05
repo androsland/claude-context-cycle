@@ -184,9 +184,23 @@ function sweep(now) {
 // fails silently — the arm simply never matches and the restore does nothing.
 // Falls back to the raw string when the path cannot be resolved (deleted, or a
 // hand-written flag), which preserves the old behaviour for those cases.
+// `.native` first, and the order is load-bearing on Windows. It calls
+// GetFinalPathNameByHandle, which expands an 8.3 short name to the long one; the JS
+// `realpathSync` resolves symlinks but leaves a short name short. That is the whole
+// Windows failure: arm.sh records `git rev-parse --show-toplevel`, which Git for
+// Windows reports as the LONG name, while the cwd handed to the hook can still be
+// the short form. Measured on a Git Bash CI runner, same directory:
+//   show-toplevel        C:/Users/runneradmin/AppData/Local/Temp/tmp.X
+//   payload cwd          C:/Users/RUNNER~1/AppData/Local/Temp/tmp.X
+//   realpathSync         C:\Users\RUNNER~1\...        <- still short, never matched
+//   realpathSync.native  C:\Users\runneradmin\...     <- matches
+// Falls back to the JS implementation and then to the raw string: `.native` can
+// throw where the JS one succeeds, and both throw on a path that no longer exists —
+// a deleted or hand-written flag, which keeps its previous behaviour either way.
 function canon(p) {
   if (!p) return '';
   const s = String(p);
+  try { return realpathSync.native(s); } catch { /* fall through */ }
   try { return realpathSync(s); } catch { return s; }
 }
 

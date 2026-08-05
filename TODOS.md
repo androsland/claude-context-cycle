@@ -14,12 +14,22 @@
   over the same span went 68/23 → 101/2. So the `realpathSync` change closed the
   macOS `/var` vs `/private/var` divergence and did nothing for Git Bash, and the
   8.3-short-name explanation was inferred from the macOS mechanism rather than
-  measured on Windows. Leading hypothesis, not yet confirmed: node's
-  `fs.realpathSync` resolves links but does not expand an 8.3 short name, where
-  `fs.realpathSync.native` (which calls `GetFinalPathNameByHandle`) does — so
-  `RUNNER~1` and `runneradmin` never compare equal. The `Path forms` CI step prints
-  both variants on every platform to settle it. The job is deliberately left red:
-  a skipped or deleted Windows job would read as coverage.
+  measured on Windows. **Mechanism now measured**, by the `Path forms` CI step, on
+  one directory on a Git Bash runner:
+
+      git rev-parse --show-toplevel   C:/Users/runneradmin/AppData/Local/Temp/tmp.X
+      payload cwd (cygpath -m)        C:/Users/RUNNER~1/AppData/Local/Temp/tmp.X
+      fs.realpathSync                 C:\Users\RUNNER~1\...        <- still short
+      fs.realpathSync.native          C:\Users\runneradmin\...
+
+  The 8.3 short name was the right suspect and `realpathSync` was the wrong tool: it
+  resolves symlinks but does not expand a short name, where `.native`
+  (`GetFinalPathNameByHandle`) does. `canon()` now tries `.native` first, falling
+  back to the JS implementation and then the raw string.
+  **Not confirmed green yet.** The fix cannot be exercised anywhere but Windows — no
+  POSIX filesystem has short names to expand — so the Windows CI job is the only
+  evidence that exists, and this entry closes when it passes, not before. Until then
+  the job stays red rather than skipped: a skipped job reads as coverage.
   (CI work, 2026-08-06)
 
 ## Testing
