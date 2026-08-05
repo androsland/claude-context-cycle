@@ -33,9 +33,20 @@ a test suite.
   bound on a machine where cycles get armed and abandoned. Unparseable flags are only
   reaped past the TTL, so a concurrent mid-write arm is never destroyed. Checkpoint
   files are still never written, moved, or deleted by the hook.
-- **Test suite added** — `bash test/run-tests.sh`, 52 assertions across 13 groups,
-  including a direct reproduction of the reported two-session bug. Runs against a
-  throwaway `CLAUDE_CONFIG_DIR`; needs only bash, node, and git.
+- **A symlinked `armed.d` can no longer be used to delete files elsewhere.** The
+  hook's sweep uses `readdirSync` + `unlinkSync`, which resolve through a symlink —
+  so replacing `armed.d` with a link made the hook reap `*.json` out of the link's
+  target instead. It now `lstat`s the directory and treats a symlink as "no arms",
+  and `arm.sh` refuses to write through one. (`uninstall.sh`'s `rm -rf` was already
+  safe here: `rm` unlinks a symlink without recursing into its target.)
+- **Control characters in a path are rejected instead of silently breaking the flag.**
+  A raw control byte in the checkpoint or project path produced invalid JSON, which
+  failed *silently* — no restore, no error, until the TTL reaped it. `arm.sh` now
+  fails loudly, with a control-byte strip in the JSON escaper as a backstop.
+- **Test suite added** — `bash test/run-tests.sh`, 58 assertions across 14 groups,
+  including a direct reproduction of the reported two-session bug and a hostile
+  state dir. Runs against a throwaway `CLAUDE_CONFIG_DIR`; needs only bash, node,
+  and git.
 - `uninstall.sh` now removes `armed.d/` as well as the pre-1.1 `armed.json` and
   `.pending-file`.
 

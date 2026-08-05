@@ -25,7 +25,7 @@
 // Only arm flags are ever deleted here. Checkpoint files are append-only: this
 // hook never writes, moves, or removes one.
 
-import { readFileSync, readdirSync, statSync, existsSync, unlinkSync, writeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync, existsSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,11 +73,22 @@ function parseCheckpoint(md) {
   return { title, nextStep };
 }
 
+// armed.d must be a real directory. readdirSync + unlinkSync(join(armDir, name))
+// resolve through a symlink, so a symlinked armed.d would make this hook enumerate
+// and DELETE *.json out of whatever directory the link points at. Treat that as
+// "no per-session arms" and never read or unlink through it. (uninstall.sh's
+// `rm -rf` on the same path is safe by contrast — rm removes a symlink without
+// recursing into its target.)
+function armDirUsable() {
+  try { return lstatSync(armDir).isDirectory(); } catch { return false; }
+}
+
 // Every arm-flag file on disk: the per-(project, session) files plus a legacy
 // single-slot armed.json if one is still lying around.
 function armPaths() {
   const out = [];
   if (existsSync(legacyArmedPath)) out.push(legacyArmedPath);
+  if (!armDirUsable()) return out;
   try {
     for (const name of readdirSync(armDir)) {
       if (name.endsWith('.json') && !name.startsWith('.tmp.')) out.push(join(armDir, name));
@@ -115,6 +126,7 @@ function sweep(now) {
     }
     if (!isFresh(arm, now)) drop(p);
   }
+  if (!armDirUsable()) return;
   try {
     for (const name of readdirSync(armDir)) {
       if (!name.startsWith('.tmp.')) continue;

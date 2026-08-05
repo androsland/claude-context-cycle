@@ -17,7 +17,12 @@ command -v git  >/dev/null 2>&1 || { echo "git is required"  >&2; exit 2; }
 [ -f "$ARM"  ] || { echo "missing $ARM"  >&2; exit 2; }
 [ -f "$HOOK" ] || { echo "missing $HOOK" >&2; exit 2; }
 
-ROOT="$(mktemp -d "${TMPDIR:-/tmp}/context-cycle-test.XXXXXX")"
+# Guard the scratch dir before anything uses it. With no `set -e`, a failed
+# mktemp would leave ROOT empty, silently pointing CLAUDE_CONFIG_DIR at the real
+# path /cfg — harmless as a normal user, but this suite writes and deletes files,
+# and CI containers run as root.
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/context-cycle-test.XXXXXX")" || ROOT=""
+[ -n "$ROOT" ] && [ -d "$ROOT" ] || { echo "mktemp -d failed; refusing to run" >&2; exit 2; }
 trap 'rm -rf "$ROOT"' EXIT
 export CLAUDE_CONFIG_DIR="$ROOT/cfg"
 ARMD="$CLAUDE_CONFIG_DIR/context-cycle/armed.d"
@@ -186,6 +191,41 @@ P13="$ROOT/p13"; mkproj "$P13"; C13="$ROOT/p13.md"
 RES=$(printf '{"source":"clear","cwd":"%s"}' "$P13" | node "$HOOK" | jsonf shape)
 eq "valid JSON, complete, truncation-noted" "SessionStart true true true" "$RES"
 eq "checkpoint size on disk" "1" "$([ "$(wc -c < "$C13")" -gt 9000 ] && echo 1 || echo 0)"
+
+echo "=== 14. Hostile state dir: symlinked armed.d, control chars in paths ==="
+rm -f "$ARMD"/*.json
+# A symlinked armed.d must not become a delete-anything primitive: readdirSync +
+# unlinkSync resolve through it, so the hook would reap *.json from the target.
+# The target file must be past the TTL: sweep() only reaps an unparseable flag
+# once it is stale, so a fresh file would survive even WITHOUT the guard and the
+# assertion would pass vacuously.
+VICTIM="$ROOT/victim"; mkdir -p "$VICTIM"; touch -d '3 hours ago' "$VICTIM/precious.json"
+mv "$ARMD" "$ARMD.real"; ln -s "$VICTIM" "$ARMD"
+printf '{"source":"clear","cwd":"%s"}' "$ROOT/p1" | node "$HOOK" >/dev/null 2>&1
+eq "hook does not delete through a symlinked armed.d" "present" \
+   "$([ -e "$VICTIM/precious.json" ] && echo present || echo GONE)"
+P14="$ROOT/p14"; mkproj "$P14"; C14="$ROOT/p14.md"; mkcp "$C14" "SYM"
+eq "arm.sh refuses a symlinked armed.d -> rc 1" "1" \
+   "$( (cd "$P14" && bash "$ARM" "$C14" >/dev/null 2>&1); echo $? )"
+eq "nothing written into the symlink target" "1" "$(ls -1 "$VICTIM" | wc -l)"
+rm -f "$ARMD"; mv "$ARMD.real" "$ARMD"
+# A control byte in a path yields invalid JSON, which fails SILENTLY (no restore,
+# no error) until the TTL reaps it. arm.sh must reject it loudly instead.
+NLCP="$ROOT/$(printf 'we\vird').md"; mkcp "$NLCP" "CTRL" 2>/dev/null
+eq "control char in checkpoint path -> rc 1" "1" \
+   "$( (cd "$P14" && bash "$ARM" "$NLCP" >/dev/null 2>&1); echo $? )"
+eq "and nothing was armed" "0" "$(arms)"
+# esc() backstop: whatever reaches the flag, it must still be parseable JSON.
+BR=$ROOT/'br"anch\test'; mkproj "$BR" 2>/dev/null
+CBR="$ROOT/br.md"; mkcp "$CBR" "QUOTES"
+(cd "$BR" && CLAUDE_CODE_SESSION_ID=s14 bash "$ARM" "$CBR" >/dev/null 2>&1)
+eq "quotes/backslashes in project path still emit valid JSON" "ok" \
+   "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+      const f=fs.readdirSync(d).filter(n=>n.endsWith(".json"));
+      if(!f.length){console.log("no flag");process.exit(0)}
+      try{JSON.parse(fs.readFileSync(p.join(d,f[0]),"utf8"));console.log("ok")}
+      catch(e){console.log("INVALID: "+e.message)}' "$ARMD")"
+rm -f "$ARMD"/*.json
 
 echo
 printf '=== %d passed, %d failed ===\n' "$PASS" "$FAIL"

@@ -23,9 +23,17 @@ set -euo pipefail
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 STATE_DIR="$CLAUDE_DIR/context-cycle"
 ARM_DIR="$STATE_DIR/armed.d"
-mkdir -p "$ARM_DIR"
 
 die() { printf 'arm.sh: %s\n' "$1" >&2; exit 1; }
+
+# armed.d must be a real directory. If it has been swapped for a symlink, both the
+# flag write and the sweep below would act on the link's target instead. GNU find
+# does not descend into a symlinked start point, so the sweep is safe in practice —
+# but that is find's default, not a guarantee this script should lean on, and the
+# hook's readdir/unlink sweep genuinely does follow it.
+[ -L "$ARM_DIR" ] && die "$ARM_DIR is a symlink, not a directory.
+  Refusing to write arm flags through it. Remove it and re-run."
+mkdir -p "$ARM_DIR"
 
 CP="${1:-}"
 # Trim surrounding whitespace so an all-whitespace argument counts as empty.
@@ -50,6 +58,14 @@ case "$CP" in
   *) die "checkpoint path must be absolute, got: $CP" ;;
 esac
 
+# A raw control byte inside a JSON string is invalid JSON, and esc() below is
+# line-oriented, so an embedded newline would split the value across lines. The
+# resulting flag parses as garbage and is silently ignored until the TTL reaps it.
+# Refuse loudly instead — a checkpoint path has no legitimate control characters.
+case "$CP" in
+  *[[:cntrl:]]*) die "checkpoint path contains a control character. Rename the file." ;;
+esac
+
 [ -f "$CP" ] || die "checkpoint file not found: $CP
   Write the checkpoint (Step 2) before arming (Step 3)."
 [ -s "$CP" ] || die "checkpoint file is empty: $CP
@@ -68,6 +84,12 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 # when the cleared session is in this same project. Fall back to $PWD outside git.
 CWD=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 NOW=$(date +%s)
+
+# Same reason as the checkpoint-path check: a control byte here produces an
+# unparseable flag, which fails *silently* (no restore, no error). Fail loudly.
+case "$CWD" in
+  *[[:cntrl:]]*) die "project path contains a control character: cannot arm safely." ;;
+esac
 
 # Short stable hash, used only to build a filename. The JSON "cwd" field below is
 # what actually gates the restore, so a hash collision cannot mis-fire a restore —
@@ -91,8 +113,11 @@ SESS=$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-}" | tr -cd 'a-zA-Z0-9-' | cut -c1
 
 DEST="$ARM_DIR/$(hash12 "$CWD")-$SESS.json"
 
-# JSON-escape backslashes and quotes.
-esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# JSON-escape backslashes and quotes. Control bytes are stripped as a backstop:
+# $CP and $CWD are already rejected above, and git forbids them in ref names, so
+# nothing should reach here with one — but emitting invalid JSON fails silently,
+# and dropping a byte from a cosmetic branch label does not.
+esc() { printf '%s' "$1" | tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 ESC_CP=$(esc "$CP_NODE")
 ESC_BR=$(esc "$BRANCH")
 ESC_CWD=$(esc "$CWD")

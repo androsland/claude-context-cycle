@@ -169,9 +169,10 @@ checkpoints are kept — delete them yourself if you want them gone.
 bash test/run-tests.sh
 ```
 
-52 assertions across 13 groups — concurrent arms, project scoping, TTL sweeping,
+58 assertions across 14 groups — concurrent arms, project scoping, TTL sweeping,
 `arm.sh` argument validation, fail-closed payload handling, legacy-flag migration,
-and full multi-KB payload delivery. It runs the repo's own `arm.sh` and hook against
+full multi-KB payload delivery, and a hostile state dir (symlinked `armed.d`,
+control characters in paths). It runs the repo's own `arm.sh` and hook against
 a throwaway `CLAUDE_CONFIG_DIR` in a temp dir, so it never reads or writes your real
 `~/.claude` and never touches an installed copy. Needs bash, node, and git — nothing
 else.
