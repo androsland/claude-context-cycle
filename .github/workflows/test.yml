@@ -7,6 +7,12 @@ on:
     branches: ['**']
   pull_request:
 
+# This job checks out code, installs node and runs a test script. It never
+# pushes, comments, tags or publishes, so it has no use for a writable token —
+# don't inherit whatever the repo default happens to be.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

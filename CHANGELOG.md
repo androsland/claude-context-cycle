@@ -6,6 +6,14 @@ CI, and an installer that no longer eats your local edits.
 
 - **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
   push and pull request. Nothing ran it before except a human remembering to.
+- **`install.sh` refuses to install through a symlinked destination.** `cp` resolves
+  a link in both directions: the new backup step would copy the link *target's*
+  contents out to a predictable `.bak` path, and the install itself would write the
+  shipped file straight through the link into that target — the second of which the
+  bare `cp` had been doing all along. Both reproduced. The installer now stops with
+  a message naming the link, rather than unlinking it silently: pointing an
+  installed file at a local checkout is a real dev setup, and quietly replacing the
+  link with a copy would break it with no way to notice.
 - **`install.sh` backs up a modified file before overwriting it.** It used to `cp`
   straight over an installed copy — no diff, no prompt, no way back — which silently
   reverted anyone who had patched their install. Now a destination that differs from

@@ -31,6 +31,21 @@ BACKED_UP=()
 # Unchanged files are left alone entirely, so a no-op reinstall writes no .bak.
 fetch() { # $1 = repo-relative path, $2 = destination
   local rel="$1" dest="$2" src tmp=""
+
+  # Both copies below operate on a symlinked destination's TARGET, not the link:
+  # `cp "$dest" "$dest.bak"` reads the target's contents out to a predictable
+  # path, and `cp "$src" "$dest"` writes straight through into it. Refuse rather
+  # than silently unlink — symlinking an installed file at a local checkout is a
+  # real dev setup, and replacing the link with a copy would break it with no
+  # way to notice.
+  if [ -L "$dest" ]; then
+    die "$dest is a symlink, not a regular file.
+  Refusing to install through it: backing it up would copy the link TARGET's
+  contents to $dest.bak, and installing would write through the link into that
+  target. If you linked this to a local checkout on purpose, remove the link (or
+  point CLAUDE_CONFIG_DIR somewhere else) and re-run."
+  fi
+
   if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$rel" ]; then
     src="$SELF_DIR/$rel"
   else
@@ -38,12 +53,24 @@ fetch() { # $1 = repo-relative path, $2 = destination
     curl -fsSL "$REPO_RAW/$rel" -o "$tmp" || { rm -f "$tmp"; die "failed to download $rel"; }
     src="$tmp"
   fi
+
   if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
-    cp "$dest" "$dest.bak" && BACKED_UP+=("$dest.bak")
+    if ! cp "$dest" "$dest.bak"; then
+      if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+      die "could not back up $dest — refusing to overwrite it."
+    fi
+    BACKED_UP+=("$dest.bak")
   fi
-  cp "$src" "$dest"
-  [ -n "$tmp" ] && rm -f "$tmp"
-  return 0   # the line above is false when tmp is unset; do not let that abort -e
+
+  # Clean up on both paths explicitly. Under `set -e` a failing `cp` aborts the
+  # function outright, so a trailing `rm -f "$tmp"` would simply never run and
+  # the downloaded file would be left behind.
+  if ! cp "$src" "$dest"; then
+    if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+    die "could not write $dest"
+  fi
+  if [ -n "$tmp" ]; then rm -f "$tmp"; fi
+  return 0
 }
 
 echo "Installing context-cycle into: $CLAUDE_DIR"

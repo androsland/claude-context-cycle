@@ -393,6 +393,22 @@ eq "the overwrite is announced, not silent" "1" \
 # Only the modified file gets a backup — an untouched sibling must stay clean.
 eq "untouched sibling not backed up" "0" \
    "$([ -f "$ROOT/inst/skills/context-cycle/SKILL.md.bak" ] && echo 1 || echo 0)"
+# A symlink at a destination must stop the install dead. `cp` resolves it in BOTH
+# directions: the backup copies the link TARGET's contents out to a predictable
+# .bak path (an arbitrary-file-read the bare-cp version did not have), and the
+# install writes the shipped file through the link into that target.
+if [ "$CAN_SYMLINK" = 1 ]; then
+  printf 'SECRET-KEY-MATERIAL\n' > "$ROOT/inst-secret"
+  rm -f "$ROOT/inst/skills/context-cycle/SKILL.md"
+  ln -s "$ROOT/inst-secret" "$ROOT/inst/skills/context-cycle/SKILL.md"
+  eq "install refuses a symlinked destination -> rc 1" "1" "$( (inst >/dev/null 2>&1); echo $? )"
+  eq "link target never read out into a .bak" "0" \
+     "$([ -e "$ROOT/inst/skills/context-cycle/SKILL.md.bak" ] && echo 1 || echo 0)"
+  eq "link target never written through" "SECRET-KEY-MATERIAL" "$(cat "$ROOT/inst-secret")"
+  rm -f "$ROOT/inst/skills/context-cycle/SKILL.md"
+else
+  skip "group 18 symlinked-destination refusal" "this shell/filesystem does not create real symlinks"
+fi
 
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
