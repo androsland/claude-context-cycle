@@ -38,13 +38,16 @@ CI, and an installer that no longer eats your local edits.
   *physical* path, while the `SessionStart` payload carries whatever the session was
   launched in, which may be *logical*. Those name the same directory and the hook
   compared them as strings, so they missed: on macOS a repo under `/tmp` or `/var` is
-  `/private/…` to git and `/…` to the shell, and under Git Bash the same directory can
-  be an 8.3 short name (`RUNNER~1`) on one side and the long name on the other. The
-  failure was silent — the arm simply never matched, the restore did nothing, and the
-  flag sat there until the TTL reaped it. Both sides are now resolved to a canonical
-  path before comparison, falling back to the raw string when a path cannot be
-  resolved. Found by the new CI: every restore assertion failed on macOS and Windows
-  while Linux passed, because on Linux the two forms happen to be identical.
+  `/private/…` to git and `/…` to the shell. The failure was silent — the arm simply
+  never matched, the restore did nothing, and the flag sat there until the TTL reaped
+  it. Both sides are now resolved to a canonical path before comparison, falling back
+  to the raw string when a path cannot be resolved. Found by the new CI: every restore
+  assertion failed on macOS and Windows while Linux passed, because on Linux the two
+  forms happen to be identical. **This fixes macOS and does not fix Windows** — the
+  macOS job went from 23 failures to 2 (both unrelated) while the Git Bash job failed
+  the same 19 assertions before and after, so whatever breaks the match there is a
+  different cause. Tracked in `TODOS.md`; the CI job stays red rather than being
+  dropped or excused.
   Resolving paths is a widening on its own — *any* symlink on the clearing cwd would
   alias into whatever it targets, so a link planted inside repo B and pointed at
   project A pulled A's checkpoint into a session working in B. Narrowed by the one

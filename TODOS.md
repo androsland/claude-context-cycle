@@ -1,5 +1,27 @@
 # TODOS
 
+## Broken on Windows
+
+- **No `armed.d` arm is ever matched under Git Bash — the restore is dead there.**
+  The Windows CI job fails 19 assertions: every restore returns nothing and arms
+  accumulate instead of being consumed (2 → 4 → 6 across groups 1–4). The legacy
+  single-slot `armed.json` case *passes*, and that is the tell — group 5 writes its
+  `cwd` through the same `cygpath -m` conversion the payload uses, so both sides are
+  byte-identical there, while an `armed.d` flag records
+  `git rev-parse --show-toplevel` instead and the two forms have to be reconciled.
+  **The path-canonicalization fix did not fix this.** Same job, same 19 failures
+  before (`b7efde1`, 49 passed/19 failed) and after (`7af86a0`, 49/19); the macOS job
+  over the same span went 68/23 → 101/2. So the `realpathSync` change closed the
+  macOS `/var` vs `/private/var` divergence and did nothing for Git Bash, and the
+  8.3-short-name explanation was inferred from the macOS mechanism rather than
+  measured on Windows. Leading hypothesis, not yet confirmed: node's
+  `fs.realpathSync` resolves links but does not expand an 8.3 short name, where
+  `fs.realpathSync.native` (which calls `GetFinalPathNameByHandle`) does — so
+  `RUNNER~1` and `runneradmin` never compare equal. The `Path forms` CI step prints
+  both variants on every platform to settle it. The job is deliberately left red:
+  a skipped or deleted Windows job would read as coverage.
+  (CI work, 2026-08-06)
+
 ## Testing
 
 - **The symlink-dependent groups never run on Windows.** That is groups 14a, 15, 16,

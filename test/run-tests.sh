@@ -54,6 +54,13 @@ skip() { SKIP=$((SKIP+1)); SKIPPED="$SKIPPED
 # this adds no new dependency.
 age() { [ -e "$1" ] || : > "$1"; node -e 'const t = Date.now()/1000 - 10800; require("fs").utimesSync(process.argv[1], t, t)' "$1"; }
 
+# Count lines on stdin. BSD `wc -l` pads its output with leading spaces and GNU does
+# not, so a bare `$(... | wc -l)` compared against a literal "1" passes on Linux and
+# fails on macOS with the gloriously unhelpful `expected: 1 / actual:          1`.
+# Two call sites had `tr -d ' '` and four did not; every count goes through here now
+# so the next one cannot be added without it.
+count() { wc -l | tr -d ' '; }
+
 # Capability probes for the hostile-state groups. Git Bash without
 # MSYS=winsymlinks:nativestrict turns `ln -s` into a plain copy, and NTFS rejects
 # '"' and control bytes in filenames outright.
@@ -245,10 +252,10 @@ sleep 1
 rm -f "$G"                                   # user moved/deleted it out of band
 eq "falls through to the live arm" '✓ Restored: "KEPT" · next: finish KEPT (testbr)' "$(clear_in "$P12")"
 eq "both dead+used arms cleared" "0" "$(arms)"
-BEFORE=$(ls -1 "$ROOT"/*.md | wc -l)
+BEFORE=$(ls -1 "$ROOT"/*.md | count)
 (cd "$P12" && CLAUDE_CODE_SESSION_ID=s12c bash "$ARM" "$K" >/dev/null 2>&1)
 clear_in "$P12" >/dev/null
-eq "checkpoint files never deleted by a restore" "$BEFORE" "$(ls -1 "$ROOT"/*.md | wc -l)"
+eq "checkpoint files never deleted by a restore" "$BEFORE" "$(ls -1 "$ROOT"/*.md | count)"
 
 echo "=== 13. Payload shape: full multi-KB checkpoint survives writeSync ==="
 P13="$ROOT/p13"; mkproj "$P13"; C13="$ROOT/p13.md"
@@ -275,7 +282,7 @@ eq "hook does not delete through a symlinked armed.d" "present" \
    "$([ -e "$VICTIM/precious.json" ] && echo present || echo GONE)"
 eq "arm.sh refuses a symlinked armed.d -> rc 1" "1" \
    "$( (cd "$P14" && bash "$ARM" "$C14" >/dev/null 2>&1); echo $? )"
-eq "nothing written into the symlink target" "1" "$(ls -1 "$VICTIM" | wc -l)"
+eq "nothing written into the symlink target" "1" "$(ls -1 "$VICTIM" | count)"
 rm -f "$ARMD"; mv "$ARMD.real" "$ARMD"
 else
   skip "group 14a (symlinked armed.d)" "this shell/filesystem does not create real symlinks"
@@ -337,7 +344,7 @@ P16="$ROOT/p16"; mkproj "$P16"; C16="$ROOT/p16.md"; mkcp "$C16" "DOTFILES"
 eq "arm.sh accepts a symlinked config root -> rc 0" "0" \
    "$( (cd "$P16" && CLAUDE_CONFIG_DIR="$(winp "$R16/claude-link")" CLAUDE_CODE_SESSION_ID=s16 bash "$ARM" "$C16" >/dev/null 2>&1); echo $? )"
 eq "flag landed in the real dir" "1" \
-   "$(ls -1 "$R16/real-claude/context-cycle/armed.d"/*.json 2>/dev/null | wc -l)"
+   "$(ls -1 "$R16/real-claude/context-cycle/armed.d"/*.json 2>/dev/null | count)"
 OUT16=$(CLAUDE_CONFIG_DIR="$(winp "$R16/claude-link")" node "$HOOK" <<EOF
 {"source":"clear","cwd":"$(winp "$P16")"}
 EOF
@@ -399,7 +406,7 @@ OUT18B=$(inst)
 eq "reinstall reports the hook already present" "1" \
    "$(printf '%s' "$OUT18B" | grep -c 'already present')"
 eq "no .bak churn when nothing differs" "0" \
-   "$(ls -1 "$ROOT/inst/skills/context-cycle"/*.bak "$ROOT/inst/hooks"/*.bak 2>/dev/null | wc -l | tr -d ' ')"
+   "$(ls -1 "$ROOT/inst/skills/context-cycle"/*.bak "$ROOT/inst/hooks"/*.bak 2>/dev/null | count)"
 # The reported bug: a locally patched install is overwritten with no diff, no
 # prompt and no backup. It must still be overwritten — but recoverably.
 printf '\n# LOCAL PATCH\n' >> "$ROOT/inst/skills/context-cycle/arm.sh"
@@ -457,7 +464,7 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   eq "install refuses a symlinked skill DIRECTORY -> rc 1" "1" \
      "$( (CLAUDE_CONFIG_DIR="$J" bash "$REPO/install.sh" >/dev/null 2>&1); echo $? )"
   eq "nothing installed into the link's target" "0" \
-     "$(ls -1 "$ROOT/decoy" | wc -l | tr -d ' ')"
+     "$(ls -1 "$ROOT/decoy" | count)"
 else
   skip "group 18 symlinked-destination refusal" "this shell/filesystem does not create real symlinks"
 fi
