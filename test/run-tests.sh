@@ -483,6 +483,20 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-4949 bash "$ARM" "$C19" >/dev/null 2>&1)
   eq "a link inside another repo does not reach its arm" "" "$(clear_in "$P19B/vendor/link")"
   eq "and that arm survives the attempt" "1" "$(arms)"
+  # Depth must not buy a bypass. The guard walks the raw path up looking for the repo
+  # the link was planted in; if that walk gives up early, "ran out of budget" is
+  # indistinguishable from "no repo above" and the caller allows it. A 64-iteration
+  # version of this walk restored at depth 70 and blocked at 63 — burying the link
+  # deep enough was the whole attack. Nesting directories inside a repo costs an
+  # attacker nothing, so assert well past any plausible cap.
+  D19="$P19B/deep"; i=0
+  while [ "$i" -lt 80 ]; do D19="$D19/d"; i=$((i + 1)); done
+  mkdir -p "$D19"; ln -s "$P19" "$D19/lnk"
+  mkcp "$C19" "TWOFORMS"
+  rm -f "$ARMD"/*.json 2>/dev/null || true   # the arm above survived; start from one
+  (cd "$P19" && CLAUDE_CODE_SESSION_ID=ff19-5959 bash "$ARM" "$C19" >/dev/null 2>&1)
+  eq "depth does not buy a bypass" "" "$(clear_in "$D19/lnk")"
+  eq "and that arm survives it too" "1" "$(arms)"
   # ...while the same shape with no repo above the link — the macOS /var and Git Bash
   # short-name cases, and a plain ~/dev symlink — must still restore. This is the
   # line the check draws, so pin both sides of it.

@@ -190,15 +190,27 @@ function canon(p) {
 // a git repo (yadm and friends) AND who reaches the project through a symlink under
 // it trips this and silently gets no restore. Both conditions are needed; the
 // conservative direction is not restoring.
+//
+// The trigger is any string divergence, not specifically a symlink hop, so a literal
+// '..' segment resolving back to the same directory also walks. Left as-is: the
+// payload cwd is Claude Code's own resolved path and does not carry '..', and if it
+// ever did, the outcome is the same conservative non-restore rather than a widening.
+// Walks to the filesystem root with NO iteration cap, deliberately. A cap here is
+// not a safety valve, it is a bypass: "ran out of budget" returns the same empty
+// string as "there is genuinely no repo above", and the caller reads that as "benign
+// alias, allow" — so burying the planted link under enough directories walks the
+// guard straight out of budget and reopens the hole. Reproduced at depth 70 against
+// a 64-iteration version; blocked at 63. Unbounded is safe: `p` loses at least one
+// character per pass and the loop stops at the first component, so it terminates in
+// at most one iteration per separator in the path.
 function rawEnclosingRepo(rawPath) {
   let p = String(rawPath).replace(/\\/g, '/').replace(/\/+$/, '');
-  for (let i = 0; i < 64; i++) {
+  for (;;) {
     const cut = p.lastIndexOf('/');
     if (cut <= 0) return '';
     p = p.slice(0, cut);
     try { if (existsSync(join(p, '.git'))) return p; } catch { /* unreadable: keep walking */ }
   }
-  return '';
 }
 
 function scopeAllows(armedCwd, curCwdRaw) {
