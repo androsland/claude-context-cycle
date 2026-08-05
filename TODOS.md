@@ -109,6 +109,22 @@
   session's cwd physically *is* the armed project, so the reader is the person who
   wrote it. (security review, 2026-08-05)
 
+- **`norm()` collapses paths that are distinct on a case-sensitive filesystem.**
+  It lowercases unconditionally, so `/tmp/Proj` and `/tmp/proj` — two different
+  directories on Linux and macOS-with-a-case-sensitive-volume — compare equal in
+  `scopeAllows()`, and an arm for one is consumed by a `/clear` in the other. It also
+  rewrites a single-letter first component to a drive path unconditionally
+  (`/a/notes` → `a:/notes`), which is the same unconditional-MSYS-rewrite bug fixed
+  in `arm.sh` this PR, still present here: `/a/x` and `/A/x` collapse together.
+  Verified by running the function directly. **Pre-existing and not worsened by this
+  PR** — `norm()` is byte-identical to `main` — and it needs two projects whose paths
+  differ only in case, so it is unlikely rather than impossible. Not fixed here on
+  purpose: both behaviours exist to make Git Bash's case-insensitive, drive-lettered
+  paths compare correctly, and narrowing them to `process.platform === 'win32'` is a
+  change to the exact comparison the Windows CI job is currently the only evidence
+  for. Worth doing once that job is reliably green, with a test on both sides.
+  (security review, 2026-08-05)
+
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
   non-following `-P` default against the real hostile-state groups, so those are no
