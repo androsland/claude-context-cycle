@@ -44,14 +44,32 @@ const legacyArmedPath = join(stateDir, 'armed.json');
 
 function noop() { process.exit(0); }                 // no stdout => nothing injected
 
-// Normalize a path for cross-tool comparison: backslashes -> '/', MSYS /c/ -> c:/,
-// drop trailing slash, lowercase (Windows filesystem is case-insensitive).
+// Normalize a path for cross-tool comparison. Everything except dropping a trailing
+// slash is a Windows accommodation and is gated on actually running there.
+//
+// Ungated, all three transforms merge paths that are genuinely different on a
+// case-sensitive filesystem, and `scopeAllows()` then treats two unrelated projects
+// as one: lowercasing makes ~/Proj and ~/proj compare equal, the MSYS rewrite makes
+// /a/x and /A/x both become 'a:/x', and collapsing backslashes makes 'a\b' and 'a/b'
+// equal where a backslash is a legal filename character. Reproduced: an arm taken in
+// ~/Proj was consumed by a /clear in a separate ~/proj repo with no symlink involved.
+// It also silently defeated the aliasing guard below, because folding case made the
+// raw and canonical forms compare equal, so the divergence branch never ran.
+//
+// Pre-existing (identical on main) rather than introduced by the canonicalization
+// work, but it lives in the same comparison and disables part of it, so it is fixed
+// here. Gating on win32 leaves Windows byte-for-byte unchanged.
+const IS_WIN = process.platform === 'win32';
 function norm(p) {
   if (!p) return '';
-  let s = String(p).replace(/\\/g, '/');
-  const m = /^\/([a-zA-Z])\/(.*)$/.exec(s);
-  if (m) s = m[1] + ':/' + m[2];
-  return s.replace(/\/+$/, '').toLowerCase();
+  let s = String(p);
+  if (IS_WIN) {
+    s = s.replace(/\\/g, '/');
+    const m = /^\/([a-zA-Z])\/(.*)$/.exec(s);
+    if (m) s = m[1] + ':/' + m[2];
+  }
+  s = s.replace(/\/+$/, '');
+  return IS_WIN ? s.toLowerCase() : s;
 }
 
 // Clamp to n chars with an ellipsis (for the one-line banner).
@@ -156,14 +174,100 @@ function sweep(now) {
 //     how a nested repo or submodule in a monorepo gets correctly rejected;
 //   - an arm with no recorded cwd (hand-written / very old) is unscoped;
 //   - an unknown current cwd fails closed and leaves the arm alone.
+// Resolve to a canonical path before comparing. The two sides come from different
+// places and legitimately name the same directory in different forms: arm.cwd is
+// `git rev-parse --show-toplevel`, which returns the PHYSICAL path, while the
+// payload cwd is whatever the session was launched in, which may be logical. On
+// macOS a repo under /tmp or /var is /private/... to git and /... to the shell; in
+// Git Bash the same directory can be an 8.3 short name on one side and the long
+// name on the other. Neither is reconcilable by string rewriting, and a mismatch
+// fails silently — the arm simply never matches and the restore does nothing.
+// Falls back to the raw string when the path cannot be resolved (deleted, or a
+// hand-written flag), which preserves the old behaviour for those cases.
+// `.native` first, and the order is load-bearing on Windows. It calls
+// GetFinalPathNameByHandle, which expands an 8.3 short name to the long one; the JS
+// `realpathSync` resolves symlinks but leaves a short name short. That is the whole
+// Windows failure: arm.sh records `git rev-parse --show-toplevel`, which Git for
+// Windows reports as the LONG name, while the cwd handed to the hook can still be
+// the short form. Measured on a Git Bash CI runner, same directory:
+//   show-toplevel        C:/Users/runneradmin/AppData/Local/Temp/tmp.X
+//   payload cwd          C:/Users/RUNNER~1/AppData/Local/Temp/tmp.X
+//   realpathSync         C:\Users\RUNNER~1\...        <- still short, never matched
+//   realpathSync.native  C:\Users\runneradmin\...     <- matches
+// Falls back to the JS implementation and then to the raw string: `.native` can
+// throw where the JS one succeeds, and both throw on a path that no longer exists —
+// a deleted or hand-written flag, which keeps its previous behaviour either way.
+function canon(p) {
+  if (!p) return '';
+  const s = String(p);
+  try { return realpathSync.native(s); } catch { /* fall through */ }
+  try { return realpathSync(s); } catch { return s; }
+}
+
+// Canonicalizing is what makes the two path forms match, but on its own it is also a
+// widening: ANY symlink on the clearing cwd now aliases into whatever it targets. A
+// link planted inside repo B and pointed at project A pulls A's checkpoint into a
+// session nominally working in B. Reproduced against the un-narrowed version.
+//
+// At the leaf the two cases are indistinguishable — in both, the cwd resolves to a
+// project directory it is not literally named after — so no test on the cwd itself
+// separates them. What separates them is what the raw path walked THROUGH. A macOS
+// /var alias, a Git Bash short name, and a plain symlink to a project directory all
+// have no repository above them; a link inside project B does, and that repo is not
+// the one we landed in. So: when resolution actually moved the path, the repository
+// the raw path belongs to *as written* must be the one the resolved path belongs to.
+//
+// Only walks when the raw and canonical forms differ, so the common case pays
+// nothing. Known false negative, recorded in TODOS.md: a user whose $HOME is itself
+// a git repo (yadm and friends) AND who reaches the project through a symlink under
+// it trips this and silently gets no restore. Both conditions are needed; the
+// conservative direction is not restoring.
+//
+// The trigger is any string divergence, not specifically a symlink hop, so a literal
+// '..' segment resolving back to the same directory also walks. Left as-is: the
+// payload cwd is Claude Code's own resolved path and does not carry '..', and if it
+// ever did, the outcome is the same conservative non-restore rather than a widening.
+// Walks to the filesystem root with NO iteration cap, deliberately. A cap here is
+// not a safety valve, it is a bypass: "ran out of budget" returns the same empty
+// string as "there is genuinely no repo above", and the caller reads that as "benign
+// alias, allow" — so burying the planted link under enough directories walks the
+// guard straight out of budget and reopens the hole. Reproduced at depth 70 against
+// a 64-iteration version; blocked at 63. Unbounded is safe: `p` loses at least one
+// character per pass and the loop stops at the first component, so it terminates in
+// at most one iteration per separator in the path.
+//
+// The backslash collapse is gated on win32 for the same reason norm()'s is, and here
+// it is not a theoretical tidy-up: on POSIX a backslash is an ordinary filename
+// character, so collapsing it splits one directory name into two, the walk then stats
+// `.git` under paths that do not exist, finds nothing, and returns '' — which the
+// caller reads as "no repo above, benign alias, allow". Reproduced: a repo literally
+// named `evil\repo` holding a symlink to the armed project restored through it while
+// the same shape named `evilrepo` was blocked.
+function rawEnclosingRepo(rawPath) {
+  let p = String(rawPath);
+  if (IS_WIN) p = p.replace(/\\/g, '/');
+  p = p.replace(/\/+$/, '');
+  for (;;) {
+    const cut = p.lastIndexOf('/');
+    if (cut <= 0) return '';
+    p = p.slice(0, cut);
+    try { if (existsSync(join(p, '.git'))) return p; } catch { /* unreadable: keep walking */ }
+  }
+}
+
 function scopeAllows(armedCwd, curCwdRaw) {
-  const a = norm(armedCwd);
-  if (!a) return true;
-  const c = norm(curCwdRaw);
+  if (!norm(armedCwd)) return true;
+  const a = norm(canon(armedCwd));
+  const cRaw = canon(curCwdRaw);
+  const c = norm(cRaw);
   if (!c) return false;
+  if (norm(curCwdRaw) !== c) {
+    const rawRepo = rawEnclosingRepo(curCwdRaw);
+    if (rawRepo && norm(canon(rawRepo)) !== a) return false;
+  }
   if (a === c) return true;
   if (!c.startsWith(a + '/')) return false;
-  try { return !existsSync(join(String(curCwdRaw), '.git')); } catch { return true; }
+  try { return !existsSync(join(cRaw, '.git')); } catch { return true; }
 }
 
 // MSYS /c/... -> C:/... for native Windows node.

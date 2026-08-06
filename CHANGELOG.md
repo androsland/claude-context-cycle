@@ -1,5 +1,93 @@
 # Changelog
 
+## Unreleased
+
+CI, and an installer that no longer eats your local edits.
+
+- **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
+  push and pull request. Nothing ran it before except a human remembering to.
+- **`install.sh` refuses to install through a symlink — at the file, at its `.bak`,
+  or at the directory above it.** `cp` resolves a link in both directions: the new
+  backup step would copy the link *target's* contents out to a predictable `.bak`
+  path, and the install itself would write the shipped file straight through the
+  link into that target — the second of which the bare `cp` had been doing all
+  along. The `.bak` name needs the same guard and is the worse of the two: `cp`
+  follows a link at its *destination* as well, so a link pre-placed at the entirely
+  predictable `<file>.bak` makes the backup write the installed file's current
+  contents into whatever it points at — and that branch fires on every upgrade
+  where the installed file differs, not on some rare edge case. `settings.json.bak`
+  had the identical hazard via node's `copyFileSync`. And because `[ -L ]` on a file
+  cannot see a link on the path *leading* to it — `mkdir -p` resolves a symlinked
+  directory and succeeds — the two directories this tool creates
+  (`skills/context-cycle/`, `context-cycle/`) are now checked before they are made.
+  All four reproduced. The installer stops with a message naming the link rather
+  than unlinking it silently: pointing an installed file at a local checkout is a
+  real dev setup, and quietly replacing the link with a copy would break it with no
+  way to notice. `~/.claude` itself, `~/.claude/skills` and `~/.claude/hooks` are
+  deliberately still allowed to be links — they are Claude Code's, shared with every
+  other skill, and pointing them at a dotfiles repo is normal.
+- **`install.sh` backs up a modified file before overwriting it.** It used to `cp`
+  straight over an installed copy — no diff, no prompt, no way back — which silently
+  reverted anyone who had patched their install. Now a destination that differs from
+  the shipped version is copied to `<file>.bak` first and the overwrite is named in
+  the output. Unchanged files are left alone, so a no-op reinstall creates no
+  backups, and each file keeps exactly one `.bak` (overwritten each run) so they
+  cannot pile up. Matches how `settings.json` was already handled.
+- **A project armed under one form of its path is now restored under any other.**
+  `arm.sh` records the project from `git rev-parse --show-toplevel`, which returns the
+  *physical* path, while the `SessionStart` payload carries whatever the session was
+  launched in, which may be *logical*. Those name the same directory and the hook
+  compared them as strings, so they missed: on macOS a repo under `/tmp` or `/var` is
+  `/private/…` to git and `/…` to the shell. The failure was silent — the arm simply
+  never matched, the restore did nothing, and the flag sat there until the TTL reaped
+  it. Both sides are now resolved to a canonical path before comparison, falling back
+  to the raw string when a path cannot be resolved. Found by the new CI: every restore
+  assertion failed on macOS and Windows while Linux passed, because on Linux the two
+  forms happen to be identical. Windows then needed a *second* fix on top:
+  `fs.realpathSync` resolves symlinks but does not expand an 8.3 short name, so
+  canonicalizing alone took macOS from 23 failures to 2 (both unrelated) and left Git
+  Bash failing the identical 19 assertions before and after. `fs.realpathSync.native`
+  — `GetFinalPathNameByHandle` — does expand it, and is now tried first; the Windows
+  job went to 68 passed, 0 failed. A `Path forms` CI step prints both variants on
+  every platform, because the short-name diagnosis was originally *inferred* from the
+  macOS mechanism rather than measured, and was wrong about which call fixed it.
+  Resolving paths is a widening on its own — *any* symlink on the clearing cwd would
+  alias into whatever it targets, so a link planted inside repo B and pointed at
+  project A pulled A's checkpoint into a session working in B. Narrowed by the one
+  thing that separates the two: what the raw path walked *through*. A `/var` alias, a
+  short name, or a plain symlink to a project has no repository above it; a planted
+  link does, and it isn't the repo we landed in. That walk collapses backslashes only
+  on Windows, where a backslash is a separator — doing it on POSIX, where it is an
+  ordinary filename character, split one directory name into two, so the walk looked
+  for `.git` under paths that do not exist, found no repo above the link, and allowed
+  the restore. Naming the attacking repo `evil\repo` was the whole bypass. Both sides
+  are pinned by tests.
+- **Two projects whose paths differ only in case are two projects again.** The scope
+  check lowercased every path, rewrote a single-letter first component to a drive
+  path, and collapsed backslashes — all unconditionally, though all three exist only
+  to make Windows paths compare correctly. On Linux, or a case-sensitive macOS volume,
+  that merged genuinely different directories: an arm taken in `~/Proj` was consumed
+  by a `/clear` in a separate `~/proj`, with no symlink involved. It also quietly
+  defeated the symlink-aliasing guard above, since folding case made the raw and
+  resolved forms compare equal so that check never ran. Now gated on actually running
+  on Windows, where behaviour is unchanged.
+- **`arm.sh` no longer rewrites POSIX paths as Windows drive paths.** The MSYS
+  `/c/…` → `C:/…` conversion ran unconditionally, so a checkpoint under any
+  single-letter top-level directory (`/a/notes.md`) was stored as `A:/notes.md` — a
+  path the hook cannot read, making the restore silently do nothing. It is now gated
+  on actually running under MSYS/Cygwin. The old expression also used `\U`, a GNU sed
+  extension BSD sed does not implement, so on macOS it was wrong in a second way.
+- **The suite is portable.** `touch -d '3 hours ago'` (GNU-only) is replaced by a
+  node `utimesSync` helper, and payload/config paths are converted to native form on
+  Windows the way Claude Code itself sends them. What a filesystem can host is
+  *probed* rather than assumed from `uname` — real symlinks, `"` and control bytes in
+  a name, case sensitivity, a literal backslash in a name — and a group whose
+  prerequisite is missing is skipped by name, with the reason and a summary count,
+  rather than quietly passing. Probing earned its keep immediately: the group needing
+  `"` and control bytes was assumed unrunnable on Windows and in fact passes there.
+  Green on all three: 106 passed on ubuntu, 103 with 1 skip on macOS, 68 with 8 skips
+  on Git Bash (six of them symlink-dependent).
+
 ## v1.1.0 — 2026-08-05
 
 Concurrency fix. Two sessions cycling at the same time could restore each other's

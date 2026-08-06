@@ -1,0 +1,89 @@
+name: tests
+
+# The suite is dependency-free (bash + node + git) and writes only to a throwaway
+# CLAUDE_CONFIG_DIR under a temp dir, so it is safe to run on hosted runners.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# This job checks out code, installs node and runs a test script. It never
+# pushes, comments, tags or publishes, so it has no use for a writable token —
+# don't inherit whatever the repo default happens to be.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platforms on one failure: the whole point of the
+      # matrix is to see WHICH platform disagrees.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The suite's assertions depend on which toolchain implementations are in
+      # play — GNU vs BSD sed/find/mktemp, bash 3.2 vs 5.x on macOS, Git Bash's
+      # MSYS layer on Windows. Print them so a platform-only failure is
+      # diagnosable from the log alone.
+      - name: Toolchain
+        shell: bash
+        run: |
+          echo "uname:  $(uname -s) $(uname -r)"
+          echo "bash:   $BASH_VERSION"
+          echo "node:   $(node --version)"
+          echo "git:    $(git --version)"
+          echo "sed:    $(sed --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+          echo "find:   $(find --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+          echo "mktemp: $(mktemp --version 2>/dev/null | head -1 || echo 'BSD/other (no --version)')"
+
+      # The two path forms this tool exists to reconcile, printed for the platform in
+      # play. arm.sh records `git rev-parse --show-toplevel`, which is the PHYSICAL
+      # path; the SessionStart payload carries whatever the session was launched in.
+      # On macOS that is /private/var vs /var; under Git Bash it can be an 8.3 short
+      # name (RUNNER~1) on one side and the long name on the other. Both node
+      # realpath variants are printed because they do not agree on Windows — the
+      # non-native one resolves links but does not expand a short name, so which one
+      # the hook calls decides whether the two forms ever compare equal. When a
+      # restore assertion fails on one platform only, read this first.
+      - name: Path forms
+        shell: bash
+        run: |
+          d=$(mktemp -d); git -C "$d" init -q >/dev/null 2>&1
+          echo "mktemp -d            : $d"
+          echo "show-toplevel        : $(cd "$d" && git rev-parse --show-toplevel)"
+          if command -v cygpath >/dev/null 2>&1; then
+            echo "cygpath -m           : $(cygpath -m "$d")"
+          fi
+          node -e '
+            const fs = require("node:fs");
+            const show = (label, fn) => {
+              try { console.log(label + fn()); } catch (e) { console.log(label + "ERROR " + e.code); }
+            };
+            for (const p of process.argv.slice(1)) {
+              console.log("--- " + p);
+              show("  realpathSync       : ", () => fs.realpathSync(p));
+              show("  realpathSync.native: ", () => fs.realpathSync.native(p));
+            }
+          ' "$d" "$(cd "$d" && git rev-parse --show-toplevel)"
+
+      # windows-latest + `shell: bash` is Git Bash, which is the environment this
+      # tool actually runs in on Windows. MSYS=winsymlinks:nativestrict is
+      # deliberately NOT set: a normal user's Git Bash does not have it, `ln -s`
+      # there copies instead of linking, and the suite's capability probe skips
+      # the symlink groups by name rather than pretending to cover them.
+      - name: Run the suite
+        shell: bash
+        run: bash test/run-tests.sh
