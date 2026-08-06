@@ -167,6 +167,18 @@
   that matter. (security review, 2026-08-05; partly closed by the CI work,
   2026-08-05)
 
+- **`safeRef()` stops structure, not spoofing.** Keeping `\p{L}`/`\p{N}` so a non-ASCII
+  branch name stays readable also admits Unicode letters that render as something they
+  are not — verified against the live regex: U+02CB MODIFIER LETTER GRAVE ACCENT (`Lm`,
+  looks like a backtick) and U+3164 HANGUL FILLER (`Lo`, renders blank) both survive,
+  while U+FF40 fullwidth grave, U+202E RTL override, U+200B zero-width space and a
+  literal U+0060 are all replaced. So a branch name can still *look* wrong in the
+  banner; it cannot close a code span, and JSON structure is never at risk because the
+  whole payload goes through one `JSON.stringify`. Cosmetic spoofing only, deliberately
+  not fixed: an ASCII-only allowlist would mangle every legitimate non-ASCII branch to
+  buy a defence against a display trick that has no mechanism behind it.
+  (security review, 2026-08-06)
+
 ## Restore semantics
 
 - **A `/clear` inside a nested repo's *subdirectory* still matches the parent's arm.**
