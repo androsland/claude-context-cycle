@@ -4,6 +4,13 @@
 
 Arms wait for you. Plus CI, and an installer that no longer eats your local edits.
 
+- **`./install.sh` actually runs now.** Both `install.sh` and `uninstall.sh` shipped
+  tracked as `100644`, so the README's own clone path — `./install.sh` — failed with
+  `Permission denied` on the very first step. The `curl | bash` route pipes into an
+  interpreter and never needs the bit, which is why it went unnoticed. Both are
+  `100755` now, and the suite asserts the tracked mode so a future `git add` of a
+  freshly-created script cannot quietly reintroduce it. `arm.sh` stays `100644`
+  deliberately: `SKILL.md` invokes it as `bash arm.sh`.
 - **An armed restore no longer expires.** It used to die after an hour. That meant
   `/context-cycle`, lunch, `/clear` — and the context was gone, with nothing said
   about why: the arm had been swept, so the clear looked like any other clear and the

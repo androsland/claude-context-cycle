@@ -755,6 +755,24 @@ else
   skip "group 20 case-collision scope matching" "this filesystem treats Proj and proj as one directory"
 fi
 
+echo "=== 21. Scripts the README says to run as ./x are tracked executable ==="
+# README's clone path is `./install.sh` and `./uninstall.sh`, and both shipped tracked
+# 100644 -- so anyone following it got `Permission denied` at the first step. It
+# survived to a release because the documented curl|bash path pipes into an
+# interpreter and never needs the bit, and because a fresh `chmod +x` in a working
+# copy makes it invisible locally: the mode lives in the INDEX, so that is what this
+# asserts. arm.sh is deliberately NOT here -- SKILL.md invokes it as `bash arm.sh`, so
+# 100644 is correct for it, and asserting otherwise would encode a rule the project
+# does not follow.
+if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  for f in install.sh uninstall.sh; do
+    eq "$f is tracked executable" "100755" \
+       "$(git -C "$REPO" ls-files -s "$f" 2>/dev/null | awk '{print $1}')"
+  done
+else
+  skip "group 21 (tracked exec bits)" "not a git work tree — running from an export, so index modes are unavailable"
+fi
+
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
 [ "$SKIP" -eq 0 ] || printf 'skipped on this platform (%s):%s\n' "$(uname -s 2>/dev/null || echo unknown)" "$SKIPPED"
