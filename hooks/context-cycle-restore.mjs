@@ -290,14 +290,13 @@ function canon(p) {
 // separates them. What separates them is what the raw path walked THROUGH. A macOS
 // /var alias, a Git Bash short name, and a plain symlink to a project directory all
 // have no repository above them; a link inside project B does, and that repo is not
-// the one we landed in. So: when resolution actually moved the path, the repository
-// the raw path belongs to *as written* must be the one the resolved path belongs to.
+// the one we landed in. So: when resolution actually moved the path, the resolved cwd
+// must still be INSIDE the repository the raw path belongs to as written.
 //
-// Only walks when the raw and canonical forms differ, so the common case pays
-// nothing. Known false negative, recorded in TODOS.md: a user whose $HOME is itself
-// a git repo (yadm and friends) AND who reaches the project through a symlink under
-// it trips this and silently gets no restore. Both conditions are needed; the
-// conservative direction is not restoring.
+// "Inside", not "equal to" — the difference is the whole of a bug this used to have,
+// and the reasoning lives at the call site in scopeAllows().
+//
+// Only walks when the raw and canonical forms differ, so the common case pays nothing.
 //
 // The trigger is any string divergence, not specifically a symlink hop, so a literal
 // '..' segment resolving back to the same directory also walks. Left as-is: the
@@ -408,9 +407,50 @@ function scopeAllows(armedCwd, curCwdRaw) {
   const cRaw = canon(curCwdRaw);
   const c = norm(cRaw);
   if (!c) return false;
+  // The aliasing guard (see rawEnclosingRepo above). It asks whether resolution carried
+  // the cwd OUT of the repository the raw path belongs to as written — NOT whether that
+  // repository *is* the armed project, which is what it asked before and which refused
+  // every project legitimately nested inside another one. A worktree or a submodule has
+  // the outer repo above it as written, so `/tmp/link/proj/wt` was refused while
+  // `/tmp/real/proj/wt` restored: same fixture, same shell, same OS. A property of the
+  // path, not the platform, which is why macOS and Windows CI hit it and Linux did not.
+  // The armed and clearing cwd being the identical string did not save it — the old
+  // form never compared them.
+  //
+  // Residual, measured rather than inferred, and not closable from here: this can only
+  // be as strong as the nearest repo above the raw path. Where that repo canonicalizes
+  // to an ancestor of the armed project, any link SITTING under it resolves to somewhere
+  // inside it and passes — where the link lives is what counts, not where it points.
+  // The precondition is weaker than "you use yadm", too: rawEnclosingRepo() stops at any
+  // entry named `.git`, file or directory, real repository or not.
+  // The benign shape is the same mechanism (a user's own shortcut under a repo-shaped
+  // $HOME, which this now restores instead of silently refusing), so nothing here can
+  // separate them. Bounded like the rest of TODOS.md's threat model: the injected
+  // content is the user's own checkpoint, and the cwd physically IS the armed project.
+  //
+  // Refusing when the enclosing repo is ITSELF a symlink does block that residual — it
+  // was tried and measured — but it also silently breaks `ln -s /mnt/big/proj ~/proj`
+  // plus a /clear from any subdirectory, which works today. A silent non-restore on a
+  // working setup is the worse of the two, so it was rejected.
+  // The second condition keeps the first from widening a DIFFERENT, already-open gap:
+  // a /clear in a subdirectory of a repo nested BELOW the armed project matches the
+  // parent's arm, because the check further down stats `.git` in the leaf only (still
+  // open, still in TODOS.md — closing it costs a stat per ancestor on every session
+  // start). Containment alone made that gap reachable through a symlink as well, where
+  // the old form refused: armed at `main`, a separate repo at `main/vendor/subrepo`,
+  // and `/clear` in `slink/src` where `slink` -> that subrepo. Reproduced both ways.
+  // Refusing when the raw path's repo sits strictly inside the armed project restores
+  // the old boundary exactly. It does NOT close the gap on the direct path, so the two
+  // routes now disagree — `main/vendor/subrepo/src` still matches, `slink/src` does
+  // not. That asymmetry is the pre-change behaviour, kept deliberately: this change is
+  // meant to be scope-neutral for that item, not to quietly take half of it.
   if (norm(curCwdRaw) !== c) {
     const rawRepo = rawEnclosingRepo(curCwdRaw);
-    if (rawRepo && norm(canon(rawRepo)) !== a) return false;
+    if (rawRepo) {
+      const r = norm(canon(rawRepo));
+      if (r && r.startsWith(a + '/')) return false;
+      if (r && c !== r && !c.startsWith(r + '/')) return false;
+    }
   }
   if (a === c) return true;
   if (!c.startsWith(a + '/')) return false;
