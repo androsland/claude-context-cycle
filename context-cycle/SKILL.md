@@ -215,10 +215,11 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   The branch is read from `.git/HEAD`, and in a linked worktree or submodule `.git` is
   a *file* pointing at a gitdir elsewhere. Rather than walk up — which would report the
   superproject's branch and so invent drift, or hide it — the hook reports no branch at
-  all, and says nothing about drift either way. The age line is unaffected. Separately,
-  and worse: if that worktree sits *inside* its main repo and the path crosses a symlink
-  or a Windows short name, the scope guard refuses the arm outright and nothing restores
-  at all. Pre-existing, recorded under Restore semantics in `TODOS.md`.
+  all, and says nothing about drift either way. The age line is unaffected. (Until
+  recently that same worktree lost the restore *entirely* when it sat inside its main
+  repo and its path crossed a symlink or a Windows short name — the scope guard refused
+  the arm before the branch was ever read. Fixed; the missing drift line is all that is
+  left of it.)
 - **A subdirectory *inside* a nested repo.** The scope gate looks for `.git` in the
   clearing session's own cwd, so a `/clear` at a nested repo's root is correctly
   rejected at any depth (`repo/a/b/nested` does not match an arm taken at `repo`).
@@ -226,6 +227,17 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   `repo/a/b/nested/src` still matches `repo`'s arm, because `src` itself holds no
   `.git`. Walking up to the nearest repo boundary would close it, at the cost of a
   stat per ancestor on every session start.
+- **A symlinked route into your project that *sits* inside a repo-shaped ancestor of
+  it.** When the path you cleared in resolves somewhere else, the gate decides whether
+  that route is legitimate by asking whether it stayed inside the repository the path
+  belongs to as written. Where an ancestor of your project is itself repo-shaped, a
+  link living under that ancestor resolves to somewhere still inside it and clears that
+  test — so what decides it is where the link sits, not where it points. The precondition is
+  weaker than "you use yadm", too: the boundary walk stops at any entry named `.git`,
+  file or directory, real repository or not. A link someone else shipped in a repo you
+  cloned therefore passes exactly as readily as a shortcut you made yourself, because
+  the two are the same mechanism. Bounded by what it yields: the content injected is
+  your own checkpoint, and the session's cwd physically *is* the armed project.
 - **A Claude Code version that stops sending `source` on SessionStart.** The hook
   requires `source === 'clear'` and fails closed, so the restore would stop firing
   entirely rather than fire on unrelated session starts. That is deliberate: the

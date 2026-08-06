@@ -4,6 +4,35 @@
 
 Arms wait for you. Plus CI, and an installer that no longer eats your local edits.
 
+- **A worktree, a submodule, or any project nested inside another repo now gets its
+  restore back.** The scope check's aliasing guard asks which repository the clearing
+  path belongs to *as written*, and it used to demand that repository **be** the armed
+  project — which is never true for a nested one, since the outer repo sits above it.
+  So wherever the path's raw and resolved forms differ (a symlink anywhere in the
+  prefix, macOS `/var`, a Windows 8.3 short name) the outer repo was found, judged
+  "not this project", and the arm refused. Silently — the `/clear` looked like any
+  other, and the pending restore just never arrived. Being armed and cleared in the
+  *identical* directory did not help; the old check never compared the two. It now asks
+  whether the resolved path stayed **inside** that repository, which is what the guard
+  was documented as doing all along. Reproduced before it was changed: same fixture,
+  same shell, same machine — `/tmp/link/proj/wt` refused, `/tmp/real/proj/wt` restored.
+  The same relaxation fixes a second silent refusal, a shortcut into your own project
+  when `$HOME` is itself a git repo (yadm, `git init ~`). Group 19b pins both — and the
+  neutrality below — with thirteen assertions, six of which fail against the code as it
+  stood and two more against the half-finished version of this fix; group 8e no longer
+  skips itself on macOS and Windows. **Not fixed
+  here**, and still in `TODOS.md`: a `/clear` in a *subdirectory* of a nested repo
+  continues to match the parent's arm — a different check entirely. Relaxing the guard
+  alone would have made that gap reachable through a symlink as well, where the old form
+  refused; a second condition holds the line, so the direct route still matches and the
+  symlinked one still does not. Caught in review, reproduced both ways. **Accepted, and
+  measured rather than assumed:** the check can only be as strong as the nearest repo
+  above the path, so where that repo is an ancestor of your project, a symlink *sitting*
+  under it resolves inside it and passes — where the link lives is what counts, not
+  where it points, and the boundary is any entry named `.git`, real repository or not.
+  The benign shortcut above is the same mechanism, so no check separates them. The
+  tighter variant that does block it was built and tested, then rejected — it silently breaks
+  `ln -s /mnt/big/proj ~/proj` plus a `/clear` from any subdirectory, which works today.
 - **An arm flag with no project can no longer claim every project.** The hook treated
   a missing or empty `cwd` as "unscoped" and fired on the next `/clear` anywhere on the
   machine, injecting whatever file the flag named as model context under the hook's own

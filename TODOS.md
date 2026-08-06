@@ -167,6 +167,23 @@
   against what it yields: the content injected is the user's own checkpoint, and the
   session's cwd physically *is* the armed project, so the reader is the person who
   wrote it. (security review, 2026-08-05)
+  **Update: the `$HOME`-is-a-repo half is closed, and one new shape is admitted in its
+  place.** The guard now asks whether the resolved cwd stayed *inside* the repository
+  the raw path belongs to, rather than whether that repository *is* the armed project,
+  so a convenience symlink under a repo-shaped `$HOME` pointed at a project *under* that
+  `$HOME` restores instead of silently doing nothing. The broader half of this entry
+  still stands: a link in one of your repos pointed at a project *outside* it is refused
+  exactly as before, and group 19 pins that. What the relaxation admits is the hostile
+  twin of the shape it fixes — a symlink shipped in a repo you clone, *sitting* under a
+  directory that canonicalizes to an ancestor of the armed project, lands inside that
+  ancestor and passes. Where it lives is what counts, not where it points, and the
+  boundary is any entry named `.git`, real repository or not.
+  Verified by running it, not reasoned about. Nothing distinguishes
+  it from the benign case because they are one mechanism, and the tighter variant that
+  does separate them costs a common working setup (see the Completed entry for what was
+  measured and why it lost). Same bound as the rest of this section: the injected
+  content is the user's own checkpoint and the cwd physically is the armed project.
+  (2026-08-06)
 
 - **Portability of the symlink hardening: BSD now executed, MSYS still not.** The
   macOS CI job exercises BSD `mktemp` (`O_EXCL` creation) and BSD `find`'s
@@ -207,26 +224,6 @@
   checkpoint, and documented as a known limitation in README.md and CHANGELOG.md.
   Revisit if Claude Code ever exposes a pre-clear session identifier to the
   `SessionStart` hook. (concurrency fix, 2026-08-05)
-- **A project nested inside another repo is refused when its path crosses a symlink or
-  an 8.3 short name.** `scopeAllows()`'s aliasing guard runs only when the clearing
-  cwd's raw and canonical forms differ, and `rawEnclosingRepo()` deliberately starts at
-  the PARENT — so where the forms differ it finds the OUTER repo, judges it "not the
-  armed project", and refuses. The armed and clearing cwd being the *identical string*
-  does not save it; the guard never compares them. Pre-existing (it came in with the
-  aliasing fix), not caused by the arm-lifetime work — found because group 8e's
-  worktree fixture tripped it on the macOS and Windows CI runners. Reproduced on one
-  Linux box, which is the point: it is a property of the PATH, not the OS. Same
-  fixture, same shell — `/tmp/link/proj/wt` refused, `/tmp/real/proj/wt` restored.
-  Real-world shapes: `git worktree add ./wt/x` inside the main repo, a submodule you
-  arm in directly, or any project under a symlinked prefix (`~/code` → another volume,
-  macOS `/var`, a Windows temp path). The failure is silent — the clear looks like any
-  other clear, which is the same class of defect the TTL removal just fixed. A fix has
-  to distinguish "the raw path traversed a symlink *below* the enclosing repo" (the
-  attack the guard exists for) from "a symlink sits somewhere in the prefix" (benign,
-  and common); deferred because narrowing a security guard needs its own review round,
-  not a tail-end commit on this branch. Group 8e is probe-gated on
-  `CAN_NESTED_SCOPE` and reports itself skipped where this bites.
-  (CI on PR #3, 2026-08-06)
 - **Drift disclosure is silently unavailable inside a linked worktree or a submodule.**
   `currentBranch()` (hooks/context-cycle-restore.mjs) reads `.git/HEAD` directly and
   now returns `''` on a bare `.git` FILE rather than walking up — walking up reported
@@ -240,6 +237,55 @@
 
 ## Completed
 
+- **A project nested inside another repo now reaches its own arm, whatever form its
+  path takes.** `scopeAllows()`'s aliasing guard asks what repository the RAW clearing
+  path belongs to, and it used to demand that repository BE the armed project — false
+  for every nested project, since a linked worktree, a submodule, or any repo checked
+  out inside another has the OUTER repo above it as written. So wherever the raw and
+  canonical forms diverged (a symlink anywhere in the prefix, macOS `/var`, a Windows
+  8.3 short name) the outer repo was found, judged "not the armed project", and the arm
+  refused. Silently, which is the class of defect this repo keeps finding. The armed and
+  clearing cwd being the *identical string* did not save it: the old form never compared
+  them. It now asks whether the resolved cwd stayed *inside* that repository — which is
+  what the guard's own comment always claimed it did. Reproduced before it was touched:
+  same fixture, same shell, same OS, `/tmp/link/proj/wt` refused and
+  `/tmp/real/proj/wt` restored. Group 19b pins it with thirteen assertions; eight fail
+  against the pre-change hook, though two of those eight fail only as fallout from the
+  arms the earlier six leave unconsumed, so six is the honest count of assertions that
+  encode the fix. The last three are aimed at something else — the containment-only
+  intermediate this group was first written for, which the pre-change hook is not.
+  Two of them fail against it; the third is a fresh-armed over-refusal guard that passes
+  against every variant tried, and it is re-armed on purpose: sharing the arm with the
+  line above it would have made it fail whenever *that* assertion failed, which reads
+  like a third negative control while testing nothing of its own. Noticed in review.
+  The `CAN_NESTED_SCOPE` probe is deleted and group 8e now runs
+  on macOS and Windows rather than skipping itself there.
+  **Two things this deliberately does not do.** It does not close the sibling item still
+  open under Restore semantics — a `/clear` in a *subdirectory* of a nested repo still
+  matches the parent's arm, which is a different check on a different line. Asking only
+  for containment *would* have widened that item's reach, which the security review of
+  this change caught and which is the part worth remembering: the fix's claim ("does not
+  close it") was true while the fix itself made it reachable by more paths. Reproduced —
+  armed at `main`, a separate repo at `main/vendor/subrepo`, `/clear` in `slink/src`
+  where `slink` → that subrepo: refused before, restored after. A second condition
+  (refuse when the raw path's repo sits strictly inside the armed project) restores the
+  old boundary exactly, so this change is scope-neutral for that item. It does not close
+  the gap on the direct path, so the two routes now disagree — `main/vendor/subrepo/src`
+  still matches, `slink/src` does not — which is the pre-change behaviour, kept
+  deliberately rather than taking half the sibling item by accident.
+  And it accepts a residual: the guard can only ever be as strong as the nearest repo
+  above the raw path, so where that repo canonicalizes to an ancestor of the armed
+  project, any symlink *sitting* under it resolves inside it and passes. Where the link
+  lives is what counts, not where it points, and the precondition is weaker than "you
+  use yadm": `rawEnclosingRepo()` stops at any entry named `.git`, file or directory,
+  real repository or not. Measured, not inferred. The benign shape — a
+  user's own shortcut under a repo-shaped `$HOME`, which this now restores instead of
+  silently refusing — is the same mechanism, so no check separates them. Refusing when
+  the enclosing repo is *itself* a symlink does block the hostile half; that variant was
+  built and measured, then rejected, because it silently breaks
+  `ln -s /mnt/big/proj ~/proj` plus a `/clear` from any subdirectory of it, which works
+  today. A silent non-restore on a setup that currently works is the worse trade.
+  (2026-08-06)
 - **shellcheck now runs in CI over every tracked shell script.** A `lint` job in
   `.github/workflows/test.yml`, ubuntu-only because static analysis returns the same
   verdict on every platform. Gated at full severity minus `SC2016` and `SC2012`, both

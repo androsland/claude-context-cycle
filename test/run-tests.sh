@@ -100,30 +100,13 @@ mkdir -p "$ROOT/.bs\\probe" 2>/dev/null
 [ -d "$ROOT/.bs\\probe" ] && [ ! -d "$ROOT/.bs" ] && CAN_BACKSLASH_NAME=1
 rm -rf "$ROOT/.bs\\probe" "$ROOT/.bs" 2>/dev/null
 
-# Does a project nested inside ANOTHER repo reach its own arm here? scopeAllows()'s
-# aliasing guard only runs when the clearing cwd's raw and canonical forms differ, and
-# rawEnclosingRepo() deliberately starts at the PARENT — so where they differ, the
-# outer repo is found, judged "not the armed project", and the arm is refused before
-# any of it is reached. The forms differ on macOS (/var -> /private/var under mktemp)
-# and on Windows CI (8.3 short names in the temp path), and agree on Linux. Group 8e
-# needs a worktree nested in its main repo, so it can only assert where they agree.
-# Probing the mechanism rather than the platform: this is a property of the PATH, not
-# of the OS, and the same shell on the same OS flips it by moving $TMPDIR.
-CAN_NESTED_SCOPE=0
-node -e '
-  const { realpathSync } = require("fs");
-  const W = process.platform === "win32";
-  const norm = p => {
-    let s = String(p);
-    if (W) { s = s.replace(/\\/g, "/"); const m = /^\/([a-zA-Z])\/(.*)$/.exec(s); if (m) s = m[1] + ":/" + m[2]; }
-    s = s.replace(/\/+$/, "");
-    return W ? s.toLowerCase() : s;
-  };
-  const raw = process.argv[1];
-  let c = raw;
-  try { c = realpathSync.native(raw); } catch { try { c = realpathSync(raw); } catch { /* keep raw */ } }
-  process.exit(norm(raw) === norm(c) ? 0 : 1);
-' "$(winp "$ROOT")" 2>/dev/null && CAN_NESTED_SCOPE=1
+# Group 8e used to be gated on a CAN_NESTED_SCOPE probe here, because a project nested
+# inside another repo was refused wherever the clearing cwd's raw and canonical forms
+# differed — true on macOS (/var -> /private/var) and Windows CI (8.3 short names),
+# false on Linux, so the group could only assert on Linux. scopeAllows() now asks
+# whether the resolved cwd stayed inside the raw path's enclosing repo rather than
+# whether that repo IS the armed project, so the gate is gone and 8e runs everywhere.
+# Group 19b covers the fix directly, with a symlink so it reproduces on any platform.
 
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.
@@ -385,10 +368,6 @@ echo "=== 8e. A worktree/submodule .git FILE reports no branch, not the parent's
 # worktree or a submodule has a `.git` FILE pointing at a gitdir elsewhere; walking
 # past it finds the superproject's `.git` DIRECTORY and reports ITS branch, which
 # fabricates drift (or hides real drift) rather than staying quiet.
-if [ "$CAN_NESTED_SCOPE" != 1 ]; then
-  skip "group 8e (worktree .git FILE)" \
-       "this temp path's raw and canonical forms differ, so scopeAllows() refuses a worktree nested in its main repo before the branch lookup is reached — see TODOS.md, Restore semantics"
-else
 P8E="$ROOT/p8e"; mkproj "$P8E"; C8E="$ROOT/p8e.md"; mkcp "$C8E" "WORKTREE"
 mkdir -p "$P8E/wt"; printf 'gitdir: %s/.git/worktrees/wt\n' "$P8E" > "$P8E/wt/.git"
 rm -f "$ARMD"/*.json
@@ -398,7 +377,6 @@ EOF
 eq "no drift claimed from a parent repo's branch" \
    '✓ Restored: "WORKTREE" · next: finish WORKTREE (feat/elsewhere)' "$(clear_in "$P8E/wt")"
 rm -f "$ARMD"/*.json
-fi
 
 echo "=== 9. Non-clear session starts never consume the arm ==="
 P9="$ROOT/p9"; mkproj "$P9"; C9="$ROOT/p9.md"; mkcp "$C9" "KEEP"
@@ -793,6 +771,104 @@ if [ "$CAN_SYMLINK" = 1 ]; then
   fi
 else
   skip "group 19 two-path-form scope matching" "this shell/filesystem does not create real symlinks"
+fi
+
+echo "=== 19b. A project nested inside another repo reaches its own arm ==="
+# The aliasing guard asks what repository the RAW path belongs to. It used to demand
+# that repository BE the armed project, which is false for every nested one: a linked
+# worktree, a submodule, or any repo checked out inside another has the OUTER repo
+# above it as written. So wherever the clearing cwd's raw and canonical forms differ —
+# a symlink anywhere in the prefix, macOS /var, a Windows 8.3 short name — the outer
+# repo was found, judged "not the armed project", and the arm refused. Silently: the
+# clear looked like any other. Found on the macOS and Windows CI runners, where the
+# temp path diverges on its own; reproduced on Linux with a symlink, which is what this
+# group uses so it asserts on every platform rather than gating itself off.
+#
+# Six of these thirteen fail against the pre-change hook. The two boundary pairs — the
+# outer repo, and a link that leaves its repo — pass either way by design: they are not
+# evidence of the fix, they are what stops it from having loosened too far. The last
+# three are aimed at a different variant entirely; see the comment above them.
+if [ "$CAN_SYMLINK" = 1 ]; then
+  N="$ROOT/n19"; mkdir -p "$N"; ln -s "$N" "$ROOT/n19-link"; NL="$ROOT/n19-link"
+  mkproj "$N/main"; CN="$ROOT/n19.md"
+
+  # A submodule-shaped repo checked out inside another repo.
+  mkproj "$N/main/sub"
+  mkcp "$CN" "NESTED-SUB"
+  (cd "$NL/main/sub" && CLAUDE_CODE_SESSION_ID=ff19-b101 bash "$ARM" "$CN" >/dev/null 2>&1)
+  eq "a nested repo restores through a symlinked prefix" \
+     '✓ Restored: "NESTED-SUB" · next: finish NESTED-SUB (testbr)' "$(clear_in "$NL/main/sub")"
+  eq "...and its arm is consumed" "0" "$(arms)"
+
+  # A linked worktree inside its own main repo. Written by hand for the same reason
+  # group 8e does it: the gitdir the `.git` FILE points at is a fixture, not a real one.
+  mkdir -p "$N/main/wt"; printf 'gitdir: %s/main/.git/worktrees/wt\n' "$N" > "$N/main/wt/.git"
+  mkcp "$CN" "NESTED-WT"
+  rm -f "$ARMD"/*.json
+  cat > "$ARMD/bbbb1919-wt.json" <<EOF
+{ "checkpoint": "$(winp "$CN")", "branch": "feat/elsewhere", "cwd": "$(winp "$N/main/wt")", "armed_at": $(date +%s) }
+EOF
+  eq "a linked worktree restores through a symlinked prefix" \
+     '✓ Restored: "NESTED-WT" · next: finish NESTED-WT (feat/elsewhere)' "$(clear_in "$NL/main/wt")"
+  eq "...and that arm is consumed" "0" "$(arms)"
+
+  # Boundary, and it must not move: the OUTER repo is still a different project.
+  mkcp "$CN" "NESTED-SUB"
+  (cd "$NL/main/sub" && CLAUDE_CODE_SESSION_ID=ff19-b202 bash "$ARM" "$CN" >/dev/null 2>&1)
+  eq "a clear in the outer repo does not take the nested arm" "" "$(clear_in "$NL/main")"
+  eq "...and the nested arm survives it" "1" "$(arms)"
+  rm -f "$ARMD"/*.json
+
+  # The same relaxation closes a documented false negative: a git repo at an ANCESTOR
+  # of the project (yadm, `git init ~`, a monorepo) plus the user's own shortcut into
+  # it used to be refused, because the ancestor is not the armed project either.
+  mkproj "$N/main/dev/proj"
+  ln -s "$N/main/dev/proj" "$N/main/shortcut"
+  mkcp "$CN" "ANCESTOR-REPO"
+  (cd "$N/main/dev/proj" && CLAUDE_CODE_SESSION_ID=ff19-b303 bash "$ARM" "$CN" >/dev/null 2>&1)
+  eq "a shortcut under a repo-shaped ancestor restores" \
+     '✓ Restored: "ANCESTOR-REPO" · next: finish ANCESTOR-REPO (testbr)' "$(clear_in "$N/main/shortcut")"
+  eq "...and that arm is consumed too" "0" "$(arms)"
+
+  # Boundary, the one the guard exists for: a link that RESOLVES OUT of the repo it
+  # sits in reaches nothing. This is the assertion that says the relaxation is
+  # "inside the enclosing repo", not "an enclosing repo was found, so allow".
+  P19X="$ROOT/p19x"; mkproj "$P19X"
+  mkdir -p "$N/main/vendor"; ln -s "$P19X" "$N/main/vendor/out"
+  CX="$ROOT/p19x.md"; mkcp "$CX" "OUTSIDE"
+  (cd "$P19X" && CLAUDE_CODE_SESSION_ID=ff19-b404 bash "$ARM" "$CX" >/dev/null 2>&1)
+  eq "a link that leaves its repo still reaches no arm" "" "$(clear_in "$N/main/vendor/out")"
+  eq "...and that arm survives the attempt" "1" "$(arms)"
+  rm -f "$ARMD"/*.json
+
+  # The relaxation must not widen the SIBLING gap that is still open in TODOS.md: a
+  # /clear in a subdirectory of a repo nested BELOW the armed project matches the
+  # parent's arm, because the check downstream stats `.git` in the leaf only. Asking
+  # for containment alone made that gap reachable through a symlink as well, where the
+  # old form refused — caught in review, reproduced both ways. The first pair fails
+  # against the containment-only version this group was first written for, NOT against
+  # main: it pins that this change stayed scope-neutral for that item rather than
+  # quietly taking half of it.
+  mkproj "$N/main/vendor/nested"; mkdir -p "$N/main/vendor/nested/src"
+  ln -s "$N/main/vendor/nested" "$N/nested-link"
+  mkcp "$CN" "PARENT"
+  (cd "$N/main" && CLAUDE_CODE_SESSION_ID=ff19-b505 bash "$ARM" "$CN" >/dev/null 2>&1)
+  eq "a link into a nested repo's subdir does not reach the parent's arm" \
+     "" "$(clear_in "$N/nested-link/src")"
+  eq "...and the parent's arm survives it" "1" "$(arms)"
+  # The other half of that invariant, on a FRESH arm. Reusing the arm above would make
+  # this fail whenever the symlinked clear wrongly consumed it — fallout from the line
+  # before, not evidence about the direct route — so it would look like a third negative
+  # control while testing nothing of its own. Re-armed, it passes against every variant
+  # tried, which is the point: it is the over-refusal guard, and it fails only if the
+  # condition added here ever starts eating the direct route too.
+  rm -f "$ARMD"/*.json
+  (cd "$N/main" && CLAUDE_CODE_SESSION_ID=ff19-b506 bash "$ARM" "$CN" >/dev/null 2>&1)
+  eq "...while the direct route still matches it (the sibling gap, untouched)" \
+     '✓ Restored: "PARENT" · next: finish PARENT (testbr)' "$(clear_in "$N/main/vendor/nested/src")"
+  rm -f "$ARMD"/*.json
+else
+  skip "group 19b nested-project scope" "this shell/filesystem does not create real symlinks"
 fi
 
 echo "=== 20. Two projects differing only in case are two projects ==="
