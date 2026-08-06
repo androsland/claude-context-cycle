@@ -3,7 +3,7 @@
 //
 // Fires only when ALL of these hold:
 //   (a) the payload says source === 'clear' (strict — see "fails closed" below),
-//   (b) an "armed" flag written by /context-cycle exists and is fresh (< TTL),
+//   (b) an "armed" flag written by /context-cycle exists and is still live,
 //   (c) the current project matches the one that flag was armed in.
 // On fire: show the user a clear-time confirmation (systemMessage) AND inject the
 // saved checkpoint into the model's context (additionalContext) — that injection
@@ -29,7 +29,29 @@ import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSyn
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const TTL_SECONDS = 3600; // a flag older than this is stale -> ignored + cleared
+// An arm does not expire by age. It lives until it is consumed, or until the
+// checkpoint it points at is gone. Closing the editor on Friday and clearing on
+// Monday has to restore exactly as it would have a minute later — that is the whole
+// point of the feature, and the old 3600s bound quietly defeated it: the arm was
+// swept, the /clear looked like any other, and nothing told the user why their
+// context did not come back.
+//
+// Set CONTEXT_CYCLE_TTL to a positive number of seconds to put the bound back, for
+// anyone who would rather a forgotten arm self-destruct than wait indefinitely.
+// Unset, blank, zero, negative and unparseable all mean "never expires" — the
+// default. When it IS set the comparison is the old two-sided one, so opting in
+// reproduces the previous behaviour exactly rather than something new.
+const armTtlRaw = Number((process.env.CONTEXT_CYCLE_TTL || '').trim());
+const ARM_TTL_SECONDS = Number.isFinite(armTtlRaw) && armTtlRaw > 0 ? armTtlRaw : 0;
+
+// Litter collection, on its own clock and deliberately NOT the same concept as arm
+// liveness. sweep() may only delete a flag it cannot parse — which is also what a
+// concurrent arm.sh mid-write looks like — so it has to wait out any plausible write
+// window first; same for abandoned .tmp.* files. That job still has to happen now
+// that arms themselves never age out, or armed.d/ grows without bound on a machine
+// where writes get interrupted. Seven days is far past any write window and far
+// short of "I was on holiday".
+const LITTER_TTL_SECONDS = 604800;
 
 // Resolve the config root to its physical path before building anything under it.
 // ~/.claude is often a symlink into a dotfiles repo (stow, chezmoi) — legitimate,
@@ -135,33 +157,48 @@ function readArm(p) {
   return null;
 }
 
-function isFresh(arm, now) {
-  if (!arm || typeof arm.armed_at !== 'number') return false;
+// Live = parses, carries a usable armed_at, and — only when the user opted into a
+// bound via CONTEXT_CYCLE_TTL — sits inside it. With no bound, age is not consulted
+// at all and only the shape is checked.
+//
+// armed_at stays REQUIRED even though nothing expires: it is what orders concurrent
+// arms at the sort further down, so a flag without it is malformed, not eternal.
+// A far-future stamp is no longer junk on its own — with no upper bound there is
+// nothing for it to be junk relative to, and clock skew across a suspend/resume or a
+// restored VM snapshot is an honest way to get one. It can only affect sort order.
+function isLive(arm, now) {
+  if (!arm || typeof arm.armed_at !== 'number' || !Number.isFinite(arm.armed_at)) return false;
+  if (!ARM_TTL_SECONDS) return true;
   const age = now - arm.armed_at;
-  return age <= TTL_SECONDS && age > -TTL_SECONDS;         // future stamps = junk
+  return age <= ARM_TTL_SECONDS && age > -ARM_TTL_SECONDS;
 }
 
 function drop(p) { try { unlinkSync(p); } catch { /* ignore */ } }
 
-// Reap expired arms on every session start, so armed.d cannot grow without bound
-// on a machine where cycles get armed and abandoned. Never touches checkpoints.
+// Collect litter on every session start, so armed.d cannot grow without bound on a
+// machine where cycles get armed and abandoned. Never touches checkpoints.
+//
+// Since arms no longer age out, an intact flag is dropped here only when it is
+// malformed (no usable armed_at) or when the user set CONTEXT_CYCLE_TTL and it fell
+// outside. An abandoned but well-formed arm is left alone on purpose: it is waiting
+// for a /clear in its own project, and there is no deadline on that.
 function sweep(now) {
   for (const p of armPaths()) {
     const arm = readArm(p);
     if (arm === null) {
       // Unparseable. Could be a concurrent arm.sh mid-write, so only reap it once
-      // it is older than the TTL — a live arm must never be destroyed.
-      try { if (now - statSync(p).mtimeMs / 1000 > TTL_SECONDS) drop(p); } catch { /* ignore */ }
+      // it is past the litter horizon — a live arm must never be destroyed.
+      try { if (now - statSync(p).mtimeMs / 1000 > LITTER_TTL_SECONDS) drop(p); } catch { /* ignore */ }
       continue;
     }
-    if (!isFresh(arm, now)) drop(p);
+    if (!isLive(arm, now)) drop(p);
   }
   if (!armDirUsable()) return;
   try {
     for (const name of readdirSync(armDir)) {
       if (!name.startsWith('.tmp.')) continue;
       const p = join(armDir, name);
-      try { if (now - statSync(p).mtimeMs / 1000 > TTL_SECONDS) drop(p); } catch { /* ignore */ }
+      try { if (now - statSync(p).mtimeMs / 1000 > LITTER_TTL_SECONDS) drop(p); } catch { /* ignore */ }
     }
   } catch { /* armed.d may not exist yet */ }
 }
@@ -255,6 +292,49 @@ function rawEnclosingRepo(rawPath) {
   }
 }
 
+// Best-effort current branch, for the drift disclosure at the bottom. Called only on
+// the restore path, never on an ordinary session start.
+//
+// Reads .git/HEAD directly instead of shelling out. The hook has no dependency on a
+// `git` binary today and this is not worth adding one for: git missing from PATH, or
+// slow on a cold network mount, would then degrade a restore that has already passed
+// every gate. Nothing here justifies that.
+//
+// Returns '' for everything it does not positively understand — a detached HEAD, a
+// bare `.git` FILE (worktrees and submodules, whose real gitdir is elsewhere), an
+// unreadable repo, no repo at all. '' means "say nothing about drift", which is the
+// safe direction: a wrong branch name in the header would be worse than no line.
+function currentBranch(cwdRaw) {
+  let p = String(cwdRaw || '');
+  if (!p) return '';
+  if (IS_WIN) p = p.replace(/\\/g, '/');
+  p = p.replace(/\/+$/, '');
+  for (;;) {
+    try {
+      const g = join(p, '.git');
+      if (existsSync(g) && statSync(g).isDirectory()) {
+        const m = /^ref:\s*refs\/heads\/(.+)$/.exec(readFileSync(join(g, 'HEAD'), 'utf8').trim());
+        return m ? m[1] : '';
+      }
+    } catch { return ''; }
+    const cut = p.lastIndexOf('/');
+    if (cut <= 0) return '';
+    p = p.slice(0, cut);
+  }
+}
+
+// Coarse on purpose: the reader needs "is this from today or from last week", not a
+// duration. Negative ages (clock skew, restored snapshot) return '' rather than a
+// nonsense "-3h" — isLive() no longer rejects a future stamp, so this has to cope.
+function humanAge(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 function scopeAllows(armedCwd, curCwdRaw) {
   if (!norm(armedCwd)) return true;
   const a = norm(canon(armedCwd));
@@ -289,11 +369,11 @@ try { sweep(now); } catch { /* a sweep failure must never break session start */
 
 if (payload.source !== 'clear') noop();   // non-clear, or no evidence of one
 
-// Candidate arms: fresh, and armed in this project.
+// Candidate arms: live, and armed in this project.
 const candidates = [];
 for (const p of armPaths()) {
   const arm = readArm(p);
-  if (!isFresh(arm, now)) continue;
+  if (!isLive(arm, now)) continue;
   if (!scopeAllows(arm.cwd, payload.cwd)) continue;        // wrong project -> leave armed
   candidates.push({ path: p, arm });
 }
@@ -343,12 +423,43 @@ confirmLine += title ? `: "${clamp(title, 60)}"` : ' context via /context-cycle'
 if (nextStep) confirmLine += ` · next: ${clamp(nextStep, 80)}`;
 if (chosen.arm.branch) confirmLine += title ? ` (${chosen.arm.branch})` : ` (branch: ${chosen.arm.branch})`;
 
+// Staleness disclosure. Arms do not expire, so a checkpoint can now be arbitrarily
+// old — that is the point, and the AFK case is exactly what it is for. The one way
+// it bites is silently resuming a plan the world has moved past: the checkpoint says
+// "PR open, waiting on review", the PR merged two days ago, and the header's own
+// "resume from this, do not repeat work already marked done" framing makes the model
+// trust it. So say the two things that make an old restore checkable — how old, and
+// whether the branch moved — and say them in BOTH channels, since the banner is the
+// only one the user sees and the header is the only one the model sees.
+//
+// Silent when there is nothing to report: a cycle-and-clear inside the same sitting,
+// which is the common case, reads exactly as it did before. STALE_AFTER is a
+// readability threshold, not a safety one — nothing changes behaviour at 4h.
+const STALE_AFTER = 4 * 3600;
+const ageSeconds = now - chosen.arm.armed_at;
+const ageLabel = humanAge(ageSeconds);
+const isOld = ageSeconds >= STALE_AFTER && !!ageLabel;
+const armedBranch = chosen.arm.branch ? clamp(String(chosen.arm.branch), 60) : '';
+const nowBranch = clamp(currentBranch(payload.cwd), 60);
+const drifted = !!armedBranch && !!nowBranch && armedBranch !== nowBranch;
+
+if (isOld) confirmLine += ` · ${ageLabel} old`;
+if (drifted) confirmLine += ` · now on ${nowBranch}`;
+
 const header =
   '## Restored working context (/context-cycle)\n' +
   'The previous conversation was saved and cleared via /context-cycle to free the ' +
   'context window. Below is the saved working state — resume from the "Remaining ' +
   'Work" section and do not repeat work already marked done.\n' +
   (chosen.arm.branch ? `Saved on branch: ${chosen.arm.branch}\n` : '') +
+  (isOld ? `Saved ${ageLabel} ago.\n` : '') +
+  (drifted
+    ? `\n**The branch has changed since this was saved** — it was written on ` +
+      `\`${armedBranch}\`, this session is on \`${nowBranch}\`. Treat the state below ` +
+      `as a starting point, not as current: re-check the "Remaining Work" items ` +
+      `against the repo before acting on them, because some may already be merged, ` +
+      `abandoned, or done differently.\n`
+    : '') +
   '\n**On your FIRST reply in this restored session, open with a 2–3 line recap** of ' +
   'what you picked up — the "Working on" title and the top 1–2 items from "Remaining ' +
   'Work" — then continue from there. Do NOT re-print the "✓ Restored" banner; the ' +

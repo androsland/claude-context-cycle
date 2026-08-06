@@ -68,6 +68,13 @@
   agent context. Fix: resolve `checkpoint` and require it under the known checkpoints
   dir, and stop treating a missing `cwd` as match-everything except for the legacy
   `armed.json` migration path specifically. (security review, 2026-08-05)
+  **Update: removing the arm TTL widened this.** A planted flag used to self-destruct
+  within an hour whether or not it was ever consumed; it now waits indefinitely for
+  the next `/clear` in the project it names. The primitive is unchanged and the
+  threat-model bound above still holds — this only removes a timer that happened to
+  limit exposure, it does not create anything new — but it raises the value of the
+  fix, because the window is now open-ended. Note the litter sweep does not close it:
+  a *well-formed* attacker flag parses fine and is never litter. (2026-08-06)
 
 - **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
   `context-cycle/` and `armed.d/` runs at startup and again immediately before the
@@ -83,7 +90,7 @@
   instance of the same window — `$DEST` briefly does not exist between the two — but
   it replaces a *deterministic* symlink-follow with one an attacker must win a
   footrace to hit, and only on the branch taken when `mv` has already failed.
-  Note the TTL sweep is *not* part of this: `find` does not follow a symlinked start
+  Note the litter sweep is *not* part of this: `find` does not follow a symlinked start
   point (POSIX default `-P`, verified on GNU findutils 4.8.0 and busybox find 1.30.1;
   BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
   (security review, 2026-08-05)

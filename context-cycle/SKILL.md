@@ -139,7 +139,7 @@ CONTEXT CYCLED — READY TO CLEAR
 Saved:   {title}
 Branch:  {branch}
 File:    {FILE}
-Armed:   one-shot restore (this project, expires in 1h)
+Armed:   one-shot restore (this project, waits until you clear)
 ════════════════════════════════════════
 
 Now press  /clear  — your saved context auto-restores into the fresh session.
@@ -152,10 +152,13 @@ Now press  /clear  — your saved context auto-restores into the fresh session.
 
 - **Never modify code.** Save state, write one file, arm the flag. Nothing else.
 - **You cannot run `/clear` for the user** — no skill or hook can. Always hand off.
-- **One-shot, fresh, same-project.** The hook fires once, only on a `/clear`, only
-  within an hour of arming, and only in the project you armed it in, then disarms
-  that one arm. A `/clear` in a different project leaves the flag armed for the
-  right one; any other `/clear` is a silent no-op.
+- **One-shot, same-project, no deadline.** The hook fires once, only on a `/clear`,
+  and only in the project you armed it in, then disarms that one arm. A `/clear` in a
+  different project leaves the flag armed for the right one; any other `/clear` is a
+  silent no-op. The arm does **not** expire — clearing days later still restores, and
+  a restore that old discloses its age and any branch change rather than passing
+  itself off as current. (`CONTEXT_CYCLE_TTL=<seconds>` reinstates a bound for anyone
+  who wants one; unset means none.)
 - **Concurrency-safe by construction.** The checkpoint path goes straight from
   Step 1 to `arm.sh` as an argument, and each arm is its own file keyed by
   (project, session) under `context-cycle/armed.d/`. Nothing about one session's
@@ -199,10 +202,15 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   Nothing is lost either way — every checkpoint file is still on disk and each
   session's arm is a separate file — and the clear-time banner names the checkpoint
   that was restored, so a mis-pair is visible rather than silent.
-- **An abandoned arm inside the TTL window.** If a session arms and never clears,
-  the next `/clear` in that same project within the hour consumes that arm. There
-  is no signal distinguishing "the session that armed this" from "some other
-  session in the same project".
+- **An abandoned arm, now with no deadline.** If a session arms and never clears, the
+  next `/clear` in that same project consumes that arm — there is no signal
+  distinguishing "the session that armed this" from "some other session in the same
+  project". Removing the 1h TTL widened this from a one-hour window to an open-ended
+  one: an arm forgotten last month is still waiting. That was a deliberate trade —
+  the bound broke the ordinary "clear it tomorrow" case far more often than it caught
+  a forgotten arm — and it is mitigated, not closed, by the age and branch-drift lines
+  on any restore older than 4 hours. The mitigation is disclosure only: the restore
+  still happens, and the user still has to notice.
 - **A subdirectory *inside* a nested repo.** The scope gate looks for `.git` in the
   clearing session's own cwd, so a `/clear` at a nested repo's root is correctly
   rejected at any depth (`repo/a/b/nested` does not match an arm taken at `repo`).

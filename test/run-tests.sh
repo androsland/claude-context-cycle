@@ -48,11 +48,16 @@ SKIP=0; SKIPPED=""
 skip() { SKIP=$((SKIP+1)); SKIPPED="$SKIPPED
   - $1 — $2"; printf '  SKIP %s\n       reason: %s\n' "$1" "$2"; }
 
-# Age a file past the hook's 3600s TTL, creating it first if absent — i.e. exactly
-# what `touch -d '3 hours ago'` did. That form is GNU-only (BSD/macOS touch has no
-# -d like it), and node is already a hard requirement of the hook under test, so
-# this adds no new dependency.
-age() { [ -e "$1" ] || : > "$1"; node -e 'const t = Date.now()/1000 - 10800; require("fs").utimesSync(process.argv[1], t, t)' "$1"; }
+# Age a file past the hook's LITTER_TTL_SECONDS (7 days), creating it first if absent.
+# node, not `touch -d '8 days ago'`: that form is GNU-only (BSD/macOS touch has no -d
+# like it), and node is already a hard requirement of the hook under test.
+#
+# This used to be 3 hours, against the old 3600s arm TTL. That number is now far too
+# small and the groups below would pass VACUOUSLY with it: 14a and 15 assert that the
+# sweep does not delete through a symlinked armed.d, and both depend on the victim file
+# being reapable in the first place — a file the sweep would spare anyway proves
+# nothing about the guard. Keep this comfortably past the litter horizon.
+age() { [ -e "$1" ] || : > "$1"; node -e 'const t = Date.now()/1000 - 691200; require("fs").utimesSync(process.argv[1], t, t)' "$1"; }
 
 # Count lines on stdin. BSD `wc -l` pads its output with leading spaces and GNU does
 # not, so a bare `$(... | wc -l)` compared against a literal "1" passes on Linux and
@@ -165,9 +170,12 @@ eq "newest checkpoint wins" '✓ Restored: "REDONE" · next: finish REDONE (test
 echo "=== 5. Legacy single-slot armed.json (session mid-cycle when this lands) ==="
 P5="$ROOT/p5"; mkproj "$P5"; C5="$ROOT/p5.md"; mkcp "$C5" "LEGACY"
 cat > "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" <<EOF
-{ "checkpoint": "$(winp "$C5")", "branch": "main", "cwd": "$(winp "$P5")", "armed_at": $(date +%s) }
+{ "checkpoint": "$(winp "$C5")", "branch": "testbr", "cwd": "$(winp "$P5")", "armed_at": $(date +%s) }
 EOF
-eq "legacy arm is consumed" '✓ Restored: "LEGACY" · next: finish LEGACY (main)' "$(clear_in "$P5")"
+# "testbr", not "main": mkproj inits on testbr, and a real legacy flag recorded the
+# branch it was actually armed on. Hard-coding a different one here made this group
+# trip the branch-drift disclosure and assert two unrelated things at once.
+eq "legacy arm is consumed" '✓ Restored: "LEGACY" · next: finish LEGACY (testbr)' "$(clear_in "$P5")"
 eq "legacy file deleted" "absent" "$([ -e "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" ] && echo present || echo absent)"
 
 echo "=== 6. Corrupt / old-format garbage never crashes ==="
@@ -212,14 +220,105 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
 esac
 rm -f "$ARMD"/*.json
 
-echo "=== 8. TTL: a stale arm is swept, never restored ==="
-P8="$ROOT/p8"; mkproj "$P8"; C8="$ROOT/p8.md"; mkcp "$C8" "STALE"
+echo "=== 8. Arms do not expire; staleness is disclosed instead ==="
+# This group used to assert the exact opposite ("a stale arm is swept, never
+# restored"). The bound was wrong, not the assertion: closing the editor and clearing
+# the next day is the normal way to use this, and the 3600s TTL swept the arm, left
+# the /clear looking like any other, and told the user nothing about why their context
+# never came back. The hazard the bound was aimed at is real but is a DISCLOSURE
+# problem, not a lifetime one — see the age/drift assertions below.
+P8="$ROOT/p8"; mkproj "$P8"; C8="$ROOT/p8.md"; mkcp "$C8" "OLD"
 mkdir -p "$ARMD"
-cat > "$ARMD/deadbeef1234-oldsess.json" <<EOF
-{ "checkpoint": "$(winp "$C8")", "branch": "", "cwd": "$(winp "$P8")", "armed_at": $(( $(date +%s) - 7200 )) }
+arm8() {  # $1 = seconds of age, $2 = branch recorded in the flag
+  rm -f "$ARMD"/*.json
+  cat > "$ARMD/deadbeef1234-oldsess.json" <<EOF
+{ "checkpoint": "$(winp "$C8")", "branch": "$2", "cwd": "$(winp "$P8")", "armed_at": $(( $(date +%s) - $1 )) }
 EOF
-eq "stale arm does not restore" "" "$(clear_in "$P8")"
-eq "stale arm swept from disk"  "0" "$(arms)"
+}
+# Two hours: dead under the old TTL, and the case that started this.
+arm8 7200 ""
+eq "2h-old arm restores"        '✓ Restored: "OLD" · next: finish OLD' "$(clear_in "$P8")"
+eq "and is consumed"            "0" "$(arms)"
+# Thirty days. Nothing special about the number — it is well past any bound anyone
+# would have picked, which is the point of asserting it rather than a second short age.
+arm8 2592000 ""
+eq "30d-old arm still restores, age disclosed" \
+   '✓ Restored: "OLD" · next: finish OLD · 30d old' "$(clear_in "$P8")"
+# A young arm must NOT get the age suffix, or the disclosure is noise on every cycle.
+arm8 600 ""
+eq "10m-old arm says nothing about age" '✓ Restored: "OLD" · next: finish OLD' "$(clear_in "$P8")"
+# armed_at is still required: it orders concurrent arms, so a flag without a usable
+# one is malformed rather than eternal. Reaped on sight, not kept forever.
+rm -f "$ARMD"/*.json
+cat > "$ARMD/deadbeef1234-nostamp.json" <<EOF
+{ "checkpoint": "$(winp "$C8")", "branch": "", "cwd": "$(winp "$P8")", "armed_at": "not-a-number" }
+EOF
+eq "arm with unusable armed_at does not restore" "" "$(clear_in "$P8")"
+eq "and is swept"               "0" "$(arms)"
+# Opt-in bound. CONTEXT_CYCLE_TTL exists for anyone who would rather a forgotten arm
+# self-destruct; setting it must reproduce the old behaviour exactly.
+arm8 7200 ""
+eq "CONTEXT_CYCLE_TTL=3600 sweeps the 2h arm" "" "$(CONTEXT_CYCLE_TTL=3600 clear_in "$P8")"
+eq "and it is gone from disk"   "0" "$(arms)"
+arm8 7200 ""
+eq "CONTEXT_CYCLE_TTL=86400 keeps it" '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL=86400 clear_in "$P8")"
+# Junk and zero must mean "no bound", not "expires immediately" — a blank-but-present
+# env var is the classic way a config value arrives, and failing closed here would
+# silently disarm every restore on machines that export it empty.
+arm8 7200 ""
+eq "CONTEXT_CYCLE_TTL=0 means no bound"     '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL=0 clear_in "$P8")"
+arm8 7200 ""
+eq "CONTEXT_CYCLE_TTL=junk means no bound"  '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL=wat clear_in "$P8")"
+arm8 7200 ""
+eq "CONTEXT_CYCLE_TTL='' means no bound"    '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL= clear_in "$P8")"
+
+echo "=== 8b. Branch drift is disclosed to the user AND to the model ==="
+# The one way a never-expiring arm bites: the checkpoint describes a branch that has
+# since moved on, and the header's own "resume from this, do not repeat work already
+# marked done" framing makes it read as current. Both output channels must say so —
+# the banner is all the user sees, the additionalContext is all the model sees.
+P8B="$ROOT/p8b"; mkproj "$P8B"; C8B="$ROOT/p8b.md"; mkcp "$C8B" "DRIFT"
+(cd "$P8B" && CLAUDE_CODE_SESSION_ID=drift-1 bash "$ARM" "$C8B" >/dev/null 2>&1)
+git -C "$P8B" checkout -q -b moved 2>/dev/null
+eq "banner names the branch we are on now" \
+   '✓ Restored: "DRIFT" · next: finish DRIFT (testbr) · now on moved' "$(clear_in "$P8B")"
+(cd "$P8B" && CLAUDE_CODE_SESSION_ID=drift-2 bash "$ARM" "$C8B" >/dev/null 2>&1)
+git -C "$P8B" checkout -q -b moved-again 2>/dev/null
+DRIFTCTX=$(node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' "$(winp "$P8B")" \
+  | node "$HOOK" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const a=JSON.parse(s).hookSpecificOutput.additionalContext;
+      console.log(a.includes("The branch has changed since this was saved") &&
+                  a.includes("`moved-again`") ? "warned" : "SILENT")})')
+eq "model context carries the drift warning" "warned" "$DRIFTCTX"
+# No drift, no line: the same-branch cycle is the common case and must stay clean.
+(cd "$P8B" && CLAUDE_CODE_SESSION_ID=drift-3 bash "$ARM" "$C8B" >/dev/null 2>&1)
+eq "same branch says nothing about drift" \
+   '✓ Restored: "DRIFT" · next: finish DRIFT (moved-again)' "$(clear_in "$P8B")"
+rm -f "$ARMD"/*.json
+
+echo "=== 8c. arm.sh must not reap another project's waiting arm ==="
+# The second place the expiry lived, and the one that would have silently undone the
+# fix if only the hook had been changed. armed.d/ is shared across every project and
+# arm.sh cannot parse JSON to tell a live arm from litter, so its old
+# `find -name '*.json' ... -mmin +60 -delete` deleted any arm older than an hour
+# whenever ANY project armed a cycle. Arming in project B ate project A's pending
+# restore. Litter collection still has to work, hence the .tmp assertion.
+P8C="$ROOT/p8c"; mkproj "$P8C"; C8C="$ROOT/p8c.md"; mkcp "$C8C" "PATIENT"
+P8D="$ROOT/p8d"; mkproj "$P8D"; C8D="$ROOT/p8d.md"; mkcp "$C8D" "OTHER"
+rm -f "$ARMD"/*.json
+cat > "$ARMD/aaaa1111-patient.json" <<EOF
+{ "checkpoint": "$(winp "$C8C")", "branch": "testbr", "cwd": "$(winp "$P8C")", "armed_at": $(( $(date +%s) - 691200 )) }
+EOF
+age "$ARMD/aaaa1111-patient.json"
+: > "$ARMD/.tmp.abandoned"; age "$ARMD/.tmp.abandoned"
+(cd "$P8D" && CLAUDE_CODE_SESSION_ID=other-sess bash "$ARM" "$C8D" >/dev/null 2>&1)
+eq "an 8d-old arm survives another project arming" "present" \
+   "$([ -e "$ARMD/aaaa1111-patient.json" ] && echo present || echo GONE)"
+eq "abandoned temp file IS still reaped" "absent" \
+   "$([ -e "$ARMD/.tmp.abandoned" ] && echo present || echo absent)"
+eq "and the 8d-old arm still restores" \
+   '✓ Restored: "PATIENT" · next: finish PATIENT (testbr) · 8d old' "$(clear_in "$P8C")"
+rm -f "$ARMD"/*.json
 
 echo "=== 9. Non-clear session starts never consume the arm ==="
 P9="$ROOT/p9"; mkproj "$P9"; C9="$ROOT/p9.md"; mkcp "$C9" "KEEP"
@@ -280,8 +379,8 @@ P14="$ROOT/p14"; mkproj "$P14"; C14="$ROOT/p14.md"; mkcp "$C14" "SYM"
 if [ "$CAN_SYMLINK" = 1 ]; then
 # A symlinked armed.d must not become a delete-anything primitive: readdirSync +
 # unlinkSync resolve through it, so the hook would reap *.json from the target.
-# The target file must be past the TTL: sweep() only reaps an unparseable flag
-# once it is stale, so a fresh file would survive even WITHOUT the guard and the
+# The target file must be past the litter horizon: sweep() only reaps an unparseable
+# flag once it is that old, so a fresh file would survive even WITHOUT the guard and the
 # assertion would pass vacuously.
 VICTIM="$ROOT/victim"; mkdir -p "$VICTIM"; age "$VICTIM/precious.json"
 mv "$ARMD" "$ARMD.real"; ln -s "$VICTIM" "$ARMD"
@@ -297,7 +396,7 @@ else
 fi
 if [ "$CAN_ODD_NAMES" = 1 ]; then
 # A control byte in a path yields invalid JSON, which fails SILENTLY (no restore,
-# no error) until the TTL reaps it. arm.sh must reject it loudly instead.
+# no error) until the litter sweep reaps it a week later. arm.sh must reject it loudly.
 NLCP="$ROOT/$(printf 'we\vird').md"; mkcp "$NLCP" "CTRL" 2>/dev/null
 eq "control char in checkpoint path -> rc 1" "1" \
    "$( (cd "$P14" && bash "$ARM" "$NLCP" >/dev/null 2>&1); echo $? )"
@@ -330,8 +429,9 @@ ln -s "$R15/evil" "$R15/cfg/context-cycle"
 P15="$ROOT/p15"; mkproj "$P15"; C15="$ROOT/p15.md"; mkcp "$C15" "ANC"
 eq "arm.sh refuses a symlinked context-cycle/ -> rc 1" "1" \
    "$( (cd "$P15" && CLAUDE_CONFIG_DIR="$(winp "$R15/cfg")" bash "$ARM" "$C15" >/dev/null 2>&1); echo $? )"
-# Assert by NAME, not by count: the pre-fix arm.sh reaped the stale precious.json
+# Assert by NAME, not by count: the arm.sh of the day reaped the stale precious.json
 # via its own `find -delete` and wrote a flag in its place, leaving the count at 1.
+# That `find` no longer matches *.json at all, so this now guards two things at once.
 eq "no flag written into the link target" "precious.json" \
    "$(ls -1 "$R15/evil/armed.d" | tr '\n' ' ' | sed 's/ *$//')"
 CLAUDE_CONFIG_DIR="$(winp "$R15/cfg")" node "$HOOK" >/dev/null 2>&1 <<EOF
