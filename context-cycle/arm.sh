@@ -75,7 +75,8 @@ esac
 
 # A raw control byte inside a JSON string is invalid JSON, and esc() below is
 # line-oriented, so an embedded newline would split the value across lines. The
-# resulting flag parses as garbage and is silently ignored until the TTL reaps it.
+# resulting flag parses as garbage and is silently ignored until the hook's litter
+# sweep reaps it, which is seven days away.
 # Refuse loudly instead — a checkpoint path has no legitimate control characters.
 case "$CP" in
   *[[:cntrl:]]*) die "checkpoint path contains a control character. Rename the file." ;;
@@ -163,7 +164,7 @@ done
 # script write the flag straight into that file. mktemp creates with O_EXCL, which
 # fails on a symlink instead of following it, and picks an unpredictable name.
 # The `.tmp.` prefix is load-bearing: the hook skips those when reading arms and
-# reaps them separately past the TTL.
+# reaps them separately past the litter horizon.
 TMP=$(mktemp "$ARM_DIR/.tmp.XXXXXX") || die "could not create a temp file in $ARM_DIR"
 cat > "$TMP" <<EOF
 {
@@ -179,11 +180,20 @@ EOF
 # create a fresh file.
 mv -f "$TMP" "$DEST" 2>/dev/null || { rm -f "$DEST"; cp -f "$TMP" "$DEST"; rm -f "$TMP"; }
 
-# Reap arms and abandoned temp files past the hook's TTL (3600s). Never touches
-# checkpoints. `find` does not follow a symlinked start point (POSIX default, -P),
-# so a link swapped in for $ARM_DIR makes this a no-op rather than a delete
-# elsewhere — verified against GNU findutils 4.8.0.
-find "$ARM_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '.tmp.*' \) -mmin +60 -delete 2>/dev/null || true
+# Reap abandoned temp files past the litter horizon (7 days = 10080 min, matching the
+# hook's LITTER_TTL_SECONDS). Never touches checkpoints.
+#
+# It deliberately no longer touches *.json. Arms do not expire any more, and this
+# script cannot parse JSON to tell a live arm from a corrupt one — while armed.d/ is
+# shared across ALL projects. The previous `-name '*.json' ... -mmin +60` therefore
+# meant that arming a cycle in one project silently deleted another project's arm that
+# was still sitting there waiting for its own /clear. Collecting corrupt flags is left
+# to the hook, which can actually parse them and can tell the difference.
+#
+# `find` does not follow a symlinked start point (POSIX default, -P), so a link
+# swapped in for $ARM_DIR makes this a no-op rather than a delete elsewhere —
+# verified against GNU findutils 4.8.0.
+find "$ARM_DIR" -maxdepth 1 -type f -name '.tmp.*' -mmin +10080 -delete 2>/dev/null || true
 
 echo "ARMED -> $CP_NODE"
 echo "ARM_FLAG -> $DEST"

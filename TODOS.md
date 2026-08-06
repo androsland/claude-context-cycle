@@ -68,6 +68,17 @@
   agent context. Fix: resolve `checkpoint` and require it under the known checkpoints
   dir, and stop treating a missing `cwd` as match-everything except for the legacy
   `armed.json` migration path specifically. (security review, 2026-08-05)
+  **Update: removing the arm TTL widened this.** A planted flag used to self-destruct
+  within an hour whether or not it was ever consumed; it now waits indefinitely for
+  the next `/clear` in the project it names. The primitive is unchanged and the
+  threat-model bound above still holds — this only removes a timer that happened to
+  limit exposure, it does not create anything new — but it raises the value of the
+  fix, because the window is now open-ended. Note the litter sweep does not close it:
+  a *well-formed* attacker flag parses fine and is never litter. Second-order effect,
+  same bound: with no TTL, `isLive()` no longer rejects an `armed_at` far outside the
+  old ±3600s window, and candidates are sorted ascending by `armed_at`, so a planted
+  flag stamped `0` deterministically wins the race against a legitimate concurrent arm
+  in the same project instead of having to be timed. (2026-08-06)
 
 - **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
   `context-cycle/` and `armed.d/` runs at startup and again immediately before the
@@ -83,7 +94,7 @@
   instance of the same window — `$DEST` briefly does not exist between the two — but
   it replaces a *deterministic* symlink-follow with one an attacker must win a
   footrace to hit, and only on the branch taken when `mv` has already failed.
-  Note the TTL sweep is *not* part of this: `find` does not follow a symlinked start
+  Note the litter sweep is *not* part of this: `find` does not follow a symlinked start
   point (POSIX default `-P`, verified on GNU findutils 4.8.0 and busybox find 1.30.1;
   BSD/macOS and Git Bash inferred from the same POSIX default, not executed).
   (security review, 2026-08-05)
@@ -156,6 +167,18 @@
   that matter. (security review, 2026-08-05; partly closed by the CI work,
   2026-08-05)
 
+- **`safeRef()` stops structure, not spoofing.** Keeping `\p{L}`/`\p{N}` so a non-ASCII
+  branch name stays readable also admits Unicode letters that render as something they
+  are not — verified against the live regex: U+02CB MODIFIER LETTER GRAVE ACCENT (`Lm`,
+  looks like a backtick) and U+3164 HANGUL FILLER (`Lo`, renders blank) both survive,
+  while U+FF40 fullwidth grave, U+202E RTL override, U+200B zero-width space and a
+  literal U+0060 are all replaced. So a branch name can still *look* wrong in the
+  banner; it cannot close a code span, and JSON structure is never at risk because the
+  whole payload goes through one `JSON.stringify`. Cosmetic spoofing only, deliberately
+  not fixed: an ASCII-only allowlist would mangle every legitimate non-ASCII branch to
+  buy a defence against a display trick that has no mechanism behind it.
+  (security review, 2026-08-06)
+
 ## Restore semantics
 
 - **A `/clear` inside a nested repo's *subdirectory* still matches the parent's arm.**
@@ -175,6 +198,36 @@
   checkpoint, and documented as a known limitation in README.md and CHANGELOG.md.
   Revisit if Claude Code ever exposes a pre-clear session identifier to the
   `SessionStart` hook. (concurrency fix, 2026-08-05)
+- **A project nested inside another repo is refused when its path crosses a symlink or
+  an 8.3 short name.** `scopeAllows()`'s aliasing guard runs only when the clearing
+  cwd's raw and canonical forms differ, and `rawEnclosingRepo()` deliberately starts at
+  the PARENT — so where the forms differ it finds the OUTER repo, judges it "not the
+  armed project", and refuses. The armed and clearing cwd being the *identical string*
+  does not save it; the guard never compares them. Pre-existing (it came in with the
+  aliasing fix), not caused by the arm-lifetime work — found because group 8e's
+  worktree fixture tripped it on the macOS and Windows CI runners. Reproduced on one
+  Linux box, which is the point: it is a property of the PATH, not the OS. Same
+  fixture, same shell — `/tmp/link/proj/wt` refused, `/tmp/real/proj/wt` restored.
+  Real-world shapes: `git worktree add ./wt/x` inside the main repo, a submodule you
+  arm in directly, or any project under a symlinked prefix (`~/code` → another volume,
+  macOS `/var`, a Windows temp path). The failure is silent — the clear looks like any
+  other clear, which is the same class of defect the TTL removal just fixed. A fix has
+  to distinguish "the raw path traversed a symlink *below* the enclosing repo" (the
+  attack the guard exists for) from "a symlink sits somewhere in the prefix" (benign,
+  and common); deferred because narrowing a security guard needs its own review round,
+  not a tail-end commit on this branch. Group 8e is probe-gated on
+  `CAN_NESTED_SCOPE` and reports itself skipped where this bites.
+  (CI on PR #3, 2026-08-06)
+- **Drift disclosure is silently unavailable inside a linked worktree or a submodule.**
+  `currentBranch()` (hooks/context-cycle-restore.mjs) reads `.git/HEAD` directly and
+  now returns `''` on a bare `.git` FILE rather than walking up — walking up reported
+  the superproject's branch, which fabricated drift or hid it. Returning `''` is the
+  safe direction (no line beats a wrong line) but it means someone who arms and clears
+  in a worktree gets no drift warning at all, and nothing tells them the check was
+  skipped. Fix is resolving the `gitdir:` pointer and reading HEAD there; deferred as
+  a handful of extra lines on the restore path for a case that also needs an arm to
+  have been made in that worktree. Age disclosure is unaffected.
+  (security review, 2026-08-06)
 
 ## Completed
 

@@ -113,9 +113,22 @@ where `/context-restore` and `/context-save list` can find them too.
   a *different* project is ignored and **leaves the flag armed** for the right one.
   A clear from a *subdirectory* of the armed repo still counts — but not from the
   root of a nested repo or submodule, which is a different project.
-- **Self-expiring.** A flag older than 1 hour is treated as stale and cleared, so a
-  much-later `/clear` won't surprise-restore. Expired flags are also swept on every
-  session start, so `armed.d/` can't grow without bound.
+- **No expiry.** An arm waits until you actually clear. Close the editor on Friday,
+  reopen on Monday, `/clear` — you get your context back. It dies when it is consumed
+  or when the checkpoint it points at is gone, not on a timer. Set
+  `CONTEXT_CYCLE_TTL=<seconds>` if you would rather a forgotten arm self-destruct.
+  (A flag used to expire after an hour, which meant going for lunch between
+  `/context-cycle` and `/clear` silently lost the restore.)
+- **Stale restores announce themselves.** Because an arm can now be days old, a
+  restore older than 4 hours says so, and one whose branch has moved since says that
+  too — in the banner you see *and* in the context the model gets, so an out-of-date
+  plan gets re-checked instead of resumed on faith. (Branch names are sanitized before
+  either channel sees them; git allows a backtick in a ref, and that name would
+  otherwise land unescaped in the model's context.) Inside a linked worktree or a
+  submodule the branch can't be read cheaply, so drift simply goes unreported there.
+- **Bounded on disk anyway.** Corrupt flags and abandoned temp files are swept after
+  7 days, so `armed.d/` can't grow without bound. That is garbage collection, and it
+  is deliberately not the same clock as an arm's lifetime.
 - **Fails closed.** `/clear` mints a brand-new session id and the hook payload carries
   no link back to the pre-clear session, so `source: "clear"` is the only evidence a
   clear actually happened. A missing or unparseable payload restores **nothing** —
@@ -169,7 +182,12 @@ checkpoints are kept — delete them yourself if you want them gone.
 bash test/run-tests.sh
 ```
 
-68 assertions across 17 groups — concurrent arms, project scoping, TTL sweeping,
+126 assertions across 24 groups, on a machine and a path where every capability probe
+passes —
+fewer where the filesystem can't do symlinks or odd filenames, and the run reports each
+group it skipped by name. Covers concurrent arms, project scoping, arm lifetime and
+staleness disclosure, litter collection,
+untrusted branch names reaching the model context,
 `arm.sh` argument validation, fail-closed payload handling, legacy-flag migration,
 full multi-KB payload delivery, a hostile state dir (symlinked `armed.d` or its
 parent, a symlink pre-placed on the flag path, control characters in paths), and a

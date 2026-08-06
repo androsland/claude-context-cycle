@@ -2,7 +2,43 @@
 
 ## Unreleased
 
-CI, and an installer that no longer eats your local edits.
+Arms wait for you. Plus CI, and an installer that no longer eats your local edits.
+
+- **An armed restore no longer expires.** It used to die after an hour. That meant
+  `/context-cycle`, lunch, `/clear` — and the context was gone, with nothing said
+  about why: the arm had been swept, so the clear looked like any other clear and the
+  fresh session had no idea a restore had ever been pending. Closing the editor and
+  picking the work up the next day, which is the ordinary way to use this, lost the
+  restore every time. An arm now lives until it is consumed or its checkpoint file
+  disappears. `CONTEXT_CYCLE_TTL=<seconds>` puts a bound back for anyone who wants
+  one; unset, blank, `0` and junk all mean no bound.
+- **The same expiry lived in a second place, and it was the worse one.** `arm.sh`
+  swept `armed.d/*.json` older than 60 minutes on every run, and `armed.d/` is shared
+  across every project — so arming a cycle in one project silently deleted another
+  project's pending restore. Its sweep now only collects abandoned `.tmp.*` files.
+  Corrupt-flag collection moved to the hook, which can actually parse a flag and tell
+  litter from a live arm; both now use a 7-day litter horizon, deliberately a
+  different clock from an arm's lifetime rather than the same constant doing two jobs.
+- **A restore that is out of date now says so.** Since an arm can be days old, the
+  banner reports the checkpoint's age past 4 hours, and if the branch has changed
+  since it was saved, both the banner and the injected context say which branch it was
+  written on and which one you are on now — with an explicit instruction to re-check
+  the "Remaining Work" items rather than resume them on faith. This is the mitigation
+  for the one thing the TTL was genuinely buying: a forgotten arm being consumed by an
+  unrelated `/clear` much later. It is disclosure, not prevention, and `SKILL.md`'s
+  known-limits section says so.
+- **Branch names are treated as untrusted before they reach the model.** The drift
+  disclosure above put a branch name into the injected context inside a code span, and
+  git permits a backtick in a ref — so reviewing a fork's PR branch, then clearing,
+  could close that span and inject text into a header the model is told to resume
+  from. Unlike everything else the hook reads, that needs no write access to
+  `~/.claude`. Branch names from both `.git/HEAD` and the arm flag now keep only
+  letters, digits and ref punctuation; anything else becomes `?`. Drift itself is still
+  decided on the raw names, so two that sanitize alike still count as different.
+- **A worktree or submodule no longer reports its parent's branch.** `.git` there is a
+  file, not a directory; the branch lookup used to walk past it and report the
+  superproject's branch as the current one, which invented drift or hid it. It now
+  reports nothing, which is the honest answer — noted as a limitation in `TODOS.md`.
 
 - **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
   push and pull request. Nothing ran it before except a human remembering to.
