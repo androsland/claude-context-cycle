@@ -37,6 +37,17 @@ CLAUDE_CONFIG_DIR="$(winp "$ROOT/cfg")"
 export CLAUDE_CONFIG_DIR
 ARMD="$CLAUDE_CONFIG_DIR/context-cycle/armed.d"
 
+# Checkpoints go where the skill actually writes them. The hook confines the
+# `checkpoint` field to the directories checkpoints are written to, so a suite that
+# scattered them across the temp root — as this one did — would either fail wholesale
+# or have to run with the escape hatch permanently open, which would leave the default
+# roots untested across every group. Putting them here instead means all ~150
+# assertions exercise the derived standalone root, and group 22 can test the policy
+# itself. It also closes a fidelity gap that predates the policy: nothing in the suite
+# used to arm from a path the skill would ever produce.
+CPD="$CLAUDE_CONFIG_DIR/context-cycle/checkpoints"
+mkdir -p "$CPD"
+
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$3"; }
@@ -112,7 +123,10 @@ rm -rf "$ROOT/.bs\\probe" "$ROOT/.bs" 2>/dev/null
 # already a hard requirement of the hook itself, so the suite adds no new dep.
 jsonf() { node -e '
   let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-    const d = JSON.parse(s), ac = d.hookSpecificOutput.additionalContext;
+    // additionalContext is optional: a refusal (group 22) is a systemMessage and
+    // nothing else, because there is no context to inject and a hookSpecificOutput
+    // carrying an undefined field is a worse thing to hand the consumer than none.
+    const d = JSON.parse(s), ac = (d.hookSpecificOutput || {}).additionalContext || "";
     if (process.argv[1] === "banner") console.log(d.systemMessage);
     else console.log(d.hookSpecificOutput.hookEventName, ac.length > 4000,
                      ac.includes("truncated"), d.systemMessage.includes("BIG"));
@@ -133,6 +147,17 @@ clear_in() {
 }
 # Raw hook stdout for a synthetic payload on stdin.
 hook_raw() { node "$HOOK"; }
+# A checkpoint-root refusal, collapsed to one token so the assertion reads as intent.
+# Anything else comes back as the raw banner rather than a bare 0, so a failure shows
+# what actually happened — including the ''  that means the hook stayed silent, which
+# is a different bug (a refusal the user never sees) and must not look like a pass.
+refused_in() {
+  local b; b=$(clear_in "$1")
+  case "$b" in
+    "⚠ "*"outside the known"*) echo "refused" ;;
+    *) echo "$b" ;;
+  esac
+}
 mkcp() { printf '## Working on: %s\n\n### Remaining Work\n1. finish %s\n' "$2" "$2" > "$1"; }
 mkproj() { mkdir -p "$1"; git -C "$1" init -q -b testbr 2>/dev/null; git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null; }
 # Count arm flags by glob rather than `ls | grep -c` (SC2010): the glob asks the shell
@@ -142,7 +167,7 @@ arms() { local n=0 f; for f in "$ARMD"/*.json; do [ -e "$f" ] && n=$((n+1)); don
 
 echo "=== 1. THE REPORTED BUG: two sessions, same project, interleaved ==="
 P="$ROOT/p1"; mkproj "$P"
-A="$ROOT/p1-A.md"; B="$ROOT/p1-B.md"; mkcp "$A" "ALPHA"; mkcp "$B" "BRAVO"
+A="$CPD/p1-A.md"; B="$CPD/p1-B.md"; mkcp "$A" "ALPHA"; mkcp "$B" "BRAVO"
 # Session A Step 1+2, Session B Step 1+2 (interleaved), then A Step 3, then B Step 3.
 (cd "$P" && CLAUDE_CODE_SESSION_ID=aaaa-1111 bash "$ARM" "$A" >/dev/null 2>&1)
 sleep 1
@@ -155,7 +180,7 @@ eq "third /clear is a no-op"      "" "$(clear_in "$P")"
 
 echo "=== 2. Two sessions, DIFFERENT projects ==="
 PA="$ROOT/p2a"; PB="$ROOT/p2b"; mkproj "$PA"; mkproj "$PB"
-CA="$ROOT/p2a.md"; CB="$ROOT/p2b.md"; mkcp "$CA" "PROJ-A"; mkcp "$CB" "PROJ-B"
+CA="$CPD/p2a.md"; CB="$CPD/p2b.md"; mkcp "$CA" "PROJ-A"; mkcp "$CB" "PROJ-B"
 (cd "$PA" && CLAUDE_CODE_SESSION_ID=s-a bash "$ARM" "$CA" >/dev/null 2>&1)
 (cd "$PB" && CLAUDE_CODE_SESSION_ID=s-b bash "$ARM" "$CB" >/dev/null 2>&1)
 eq "two project arms coexist" "2" "$(arms)"
@@ -164,13 +189,13 @@ eq "B's arm survives A's clear" "1" "$(arms)"
 eq "clear in B gets PROJ-B" '✓ Restored: "PROJ-B" · next: finish PROJ-B (testbr)' "$(clear_in "$PB")"
 
 echo "=== 3. Single-session baseline (must not break) ==="
-P3="$ROOT/p3"; mkproj "$P3"; C3="$ROOT/p3.md"; mkcp "$C3" "SOLO"
+P3="$ROOT/p3"; mkproj "$P3"; C3="$CPD/p3.md"; mkcp "$C3" "SOLO"
 (cd "$P3" && CLAUDE_CODE_SESSION_ID=solo-1 bash "$ARM" "$C3" >/dev/null 2>&1)
 eq "solo restore fires"   '✓ Restored: "SOLO" · next: finish SOLO (testbr)' "$(clear_in "$P3")"
 eq "one-shot: 2nd is no-op" "" "$(clear_in "$P3")"
 
 echo "=== 4. Re-arm in the SAME session supersedes (newest wins, no accumulation) ==="
-P4="$ROOT/p4"; mkproj "$P4"; O="$ROOT/p4-old.md"; N="$ROOT/p4-new.md"
+P4="$ROOT/p4"; mkproj "$P4"; O="$CPD/p4-old.md"; N="$CPD/p4-new.md"
 mkcp "$O" "STALE-DRAFT"; mkcp "$N" "REDONE"
 (cd "$P4" && CLAUDE_CODE_SESSION_ID=same-sess bash "$ARM" "$O" >/dev/null 2>&1)
 sleep 1
@@ -179,7 +204,7 @@ eq "still exactly one arm" "1" "$(arms)"
 eq "newest checkpoint wins" '✓ Restored: "REDONE" · next: finish REDONE (testbr)' "$(clear_in "$P4")"
 
 echo "=== 5. Legacy single-slot armed.json (session mid-cycle when this lands) ==="
-P5="$ROOT/p5"; mkproj "$P5"; C5="$ROOT/p5.md"; mkcp "$C5" "LEGACY"
+P5="$ROOT/p5"; mkproj "$P5"; C5="$CPD/p5.md"; mkcp "$C5" "LEGACY"
 cat > "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" <<EOF
 { "checkpoint": "$(winp "$C5")", "branch": "testbr", "cwd": "$(winp "$P5")", "armed_at": $(date +%s) }
 EOF
@@ -200,7 +225,7 @@ printf '{"source":"startup","cwd":"%s"}' "$(winp "$P5")" | node "$HOOK" >/dev/nu
 eq "old garbage reaped by sweep" "absent" "$([ -e "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" ] && echo present || echo absent)"
 
 echo "=== 7. arm.sh rejects everything that used to silently fall back ==="
-P7="$ROOT/p7"; mkproj "$P7"; C7="$ROOT/p7.md"; mkcp "$C7" "GOOD"
+P7="$ROOT/p7"; mkproj "$P7"; C7="$CPD/p7.md"; mkcp "$C7" "GOOD"
 # shellcheck disable=SC2069  # The order is deliberate: stderr to the capture, stdout to
 # /dev/null. arm.sh writes its refusals to stderr and these assertions read the message.
 try() { (cd "$P7" && bash "$ARM" "$1" 2>&1 >/dev/null); }
@@ -213,8 +238,8 @@ eq "literal \$FILE -> rc 1"     "1" "$(rc '$FILE')"
 eq "\$FILE message names the cause" "arm.sh: argument looks like an unexpanded shell variable: \$FILE" "$(try '$FILE' | head -1)"
 eq "relative path -> rc 1"      "1" "$(rc 'notes/cp.md')"
 eq "missing file -> rc 1"       "1" "$(rc '/nope/gone.md')"
-: > "$ROOT/empty.md"
-eq "empty checkpoint -> rc 1"   "1" "$(rc "$ROOT/empty.md")"
+: > "$CPD/empty.md"
+eq "empty checkpoint -> rc 1"   "1" "$(rc "$CPD/empty.md")"
 eq "nothing got armed by any of those" "0" "$(arms)"
 eq "valid path -> rc 0"         "0" "$(rc "$C7")"
 eq "and it armed"               "1" "$(arms)"
@@ -240,7 +265,7 @@ echo "=== 8. Arms do not expire; staleness is disclosed instead ==="
 # the /clear looking like any other, and told the user nothing about why their context
 # never came back. The hazard the bound was aimed at is real but is a DISCLOSURE
 # problem, not a lifetime one — see the age/drift assertions below.
-P8="$ROOT/p8"; mkproj "$P8"; C8="$ROOT/p8.md"; mkcp "$C8" "OLD"
+P8="$ROOT/p8"; mkproj "$P8"; C8="$CPD/p8.md"; mkcp "$C8" "OLD"
 mkdir -p "$ARMD"
 arm8() {  # $1 = seconds of age, $2 = branch recorded in the flag
   rm -f "$ARMD"/*.json
@@ -290,7 +315,7 @@ echo "=== 8b. Branch drift is disclosed to the user AND to the model ==="
 # since moved on, and the header's own "resume from this, do not repeat work already
 # marked done" framing makes it read as current. Both output channels must say so —
 # the banner is all the user sees, the additionalContext is all the model sees.
-P8B="$ROOT/p8b"; mkproj "$P8B"; C8B="$ROOT/p8b.md"; mkcp "$C8B" "DRIFT"
+P8B="$ROOT/p8b"; mkproj "$P8B"; C8B="$CPD/p8b.md"; mkcp "$C8B" "DRIFT"
 (cd "$P8B" && CLAUDE_CODE_SESSION_ID=drift-1 bash "$ARM" "$C8B" >/dev/null 2>&1)
 git -C "$P8B" checkout -q -b moved 2>/dev/null
 eq "banner names the branch we are on now" \
@@ -316,8 +341,8 @@ echo "=== 8c. arm.sh must not reap another project's waiting arm ==="
 # `find -name '*.json' ... -mmin +60 -delete` deleted any arm older than an hour
 # whenever ANY project armed a cycle. Arming in project B ate project A's pending
 # restore. Litter collection still has to work, hence the .tmp assertion.
-P8C="$ROOT/p8c"; mkproj "$P8C"; C8C="$ROOT/p8c.md"; mkcp "$C8C" "PATIENT"
-P8D="$ROOT/p8d"; mkproj "$P8D"; C8D="$ROOT/p8d.md"; mkcp "$C8D" "OTHER"
+P8C="$ROOT/p8c"; mkproj "$P8C"; C8C="$CPD/p8c.md"; mkcp "$C8C" "PATIENT"
+P8D="$ROOT/p8d"; mkproj "$P8D"; C8D="$CPD/p8d.md"; mkcp "$C8D" "OTHER"
 rm -f "$ARMD"/*.json
 cat > "$ARMD/aaaa1111-patient.json" <<EOF
 { "checkpoint": "$(winp "$C8C")", "branch": "testbr", "cwd": "$(winp "$P8C")", "armed_at": $(( $(date +%s) - 691200 )) }
@@ -341,7 +366,7 @@ echo "=== 8d. A branch name is untrusted input and must not reach the model raw 
 # do. So an unescaped name closes the span and injects into a context the model is told
 # to "resume from". HEAD is written directly here rather than via `git checkout -b` so
 # the assertion tests the hook, not whether the filesystem tolerates the ref filename.
-P8F="$ROOT/p8f"; mkproj "$P8F"; C8F="$ROOT/p8f.md"; mkcp "$C8F" "HOSTILE"
+P8F="$ROOT/p8f"; mkproj "$P8F"; C8F="$CPD/p8f.md"; mkcp "$C8F" "HOSTILE"
 (cd "$P8F" && CLAUDE_CODE_SESSION_ID=hostile-1 bash "$ARM" "$C8F" >/dev/null 2>&1)
 printf 'ref: refs/heads/pr-42`IGNORE`\n' > "$P8F/.git/HEAD"
 eq "banner neutralizes a hostile branch name" \
@@ -368,7 +393,7 @@ echo "=== 8e. A worktree/submodule .git FILE reports no branch, not the parent's
 # worktree or a submodule has a `.git` FILE pointing at a gitdir elsewhere; walking
 # past it finds the superproject's `.git` DIRECTORY and reports ITS branch, which
 # fabricates drift (or hides real drift) rather than staying quiet.
-P8E="$ROOT/p8e"; mkproj "$P8E"; C8E="$ROOT/p8e.md"; mkcp "$C8E" "WORKTREE"
+P8E="$ROOT/p8e"; mkproj "$P8E"; C8E="$CPD/p8e.md"; mkcp "$C8E" "WORKTREE"
 mkdir -p "$P8E/wt"; printf 'gitdir: %s/.git/worktrees/wt\n' "$P8E" > "$P8E/wt/.git"
 rm -f "$ARMD"/*.json
 cat > "$ARMD/aaaa4444-wt.json" <<EOF
@@ -379,7 +404,7 @@ eq "no drift claimed from a parent repo's branch" \
 rm -f "$ARMD"/*.json
 
 echo "=== 9. Non-clear session starts never consume the arm ==="
-P9="$ROOT/p9"; mkproj "$P9"; C9="$ROOT/p9.md"; mkcp "$C9" "KEEP"
+P9="$ROOT/p9"; mkproj "$P9"; C9="$CPD/p9.md"; mkcp "$C9" "KEEP"
 (cd "$P9" && CLAUDE_CODE_SESSION_ID=s9 bash "$ARM" "$C9" >/dev/null 2>&1)
 eq "source=startup: silent"  "" "$(printf '{"source":"startup","cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
 eq "source=resume: silent"   "" "$(printf '{"source":"resume","cwd":"%s"}' "$(winp "$P9")" | hook_raw)"
@@ -396,13 +421,13 @@ eq "a real clear still works" '✓ Restored: "KEEP" · next: finish KEEP (testbr
 echo "=== 11. Project scope: subdirectories vs nested repos ==="
 P11="$ROOT/p11"; mkproj "$P11"; mkdir -p "$P11/frontend" "$P11/vendor/lib"
 git -C "$P11/vendor/lib" init -q 2>/dev/null            # nested repo = other project
-C11="$ROOT/p11.md"; mkcp "$C11" "MONO"
+C11="$CPD/p11.md"; mkcp "$C11" "MONO"
 (cd "$P11" && CLAUDE_CODE_SESSION_ID=s11 bash "$ARM" "$C11" >/dev/null 2>&1)
 eq "clear in a nested REPO does not fire" "" "$(clear_in "$P11/vendor/lib")"
 eq "arm survives the nested-repo clear"   "1" "$(arms)"
 eq "clear in a plain subdir does fire" '✓ Restored: "MONO" · next: finish MONO (testbr)' "$(clear_in "$P11/frontend")"
 # unrelated project must never match
-C11b="$ROOT/p11b.md"; mkcp "$C11b" "MONO2"
+C11b="$CPD/p11b.md"; mkcp "$C11b" "MONO2"
 (cd "$P11" && CLAUDE_CODE_SESSION_ID=s11b bash "$ARM" "$C11b" >/dev/null 2>&1)
 eq "clear in an unrelated dir does not fire" "" "$(clear_in "$ROOT/p2a")"
 eq "arm survives that too" "1" "$(arms)"
@@ -416,7 +441,7 @@ echo "=== 11b. A hand-written flag cannot claim every project, or jump the queue
 # all, and armed_at:0 sorts ahead of every real arm. Together that is one flag that
 # fires wherever the user happens to clear next and wins if a real arm is also
 # waiting. Each assertion below fails against the pre-change hook.
-P11c="$ROOT/p11c"; mkproj "$P11c"; C11c="$ROOT/p11c.md"; mkcp "$C11c" "PLANTED"
+P11c="$ROOT/p11c"; mkproj "$P11c"; C11c="$CPD/p11c.md"; mkcp "$C11c" "PLANTED"
 plant() { printf '{ "checkpoint": "%s", "branch": "testbr", %s }\n' \
   "$(winp "$C11c")" "$2" > "$1"; }
 
@@ -458,7 +483,7 @@ done
 
 # (e) the point of (d): a real arm in the same project must win, not merely coexist.
 # Pre-change, armed_at:0 sorts first and PLANTED is restored instead of REAL.
-C11d="$ROOT/p11d.md"; mkcp "$C11d" "REAL"
+C11d="$CPD/p11d.md"; mkcp "$C11d" "REAL"
 (cd "$P11c" && CLAUDE_CODE_SESSION_ID=s11c bash "$ARM" "$C11d" >/dev/null 2>&1)
 plant "$ARMD/zz-race.json" "\"cwd\": \"$(winp "$P11c")\", \"armed_at\": 0"
 eq "a real arm beats a flag stamped 0" '✓ Restored: "REAL" · next: finish REAL (testbr)' "$(clear_in "$P11c")"
@@ -466,20 +491,20 @@ rm -f "$ARMD"/*.json
 
 echo "=== 12. Vanished checkpoint: skip to the next arm, never delete a checkpoint ==="
 P12="$ROOT/p12"; mkproj "$P12"
-G="$ROOT/p12-gone.md"; K="$ROOT/p12-kept.md"; mkcp "$G" "GONE"; mkcp "$K" "KEPT"
+G="$CPD/p12-gone.md"; K="$CPD/p12-kept.md"; mkcp "$G" "GONE"; mkcp "$K" "KEPT"
 (cd "$P12" && CLAUDE_CODE_SESSION_ID=s12a bash "$ARM" "$G" >/dev/null 2>&1)
 sleep 1
 (cd "$P12" && CLAUDE_CODE_SESSION_ID=s12b bash "$ARM" "$K" >/dev/null 2>&1)
 rm -f "$G"                                   # user moved/deleted it out of band
 eq "falls through to the live arm" '✓ Restored: "KEPT" · next: finish KEPT (testbr)' "$(clear_in "$P12")"
 eq "both dead+used arms cleared" "0" "$(arms)"
-BEFORE=$(ls -1 "$ROOT"/*.md | count)
+BEFORE=$(ls -1 "$CPD"/*.md | count)
 (cd "$P12" && CLAUDE_CODE_SESSION_ID=s12c bash "$ARM" "$K" >/dev/null 2>&1)
 clear_in "$P12" >/dev/null
-eq "checkpoint files never deleted by a restore" "$BEFORE" "$(ls -1 "$ROOT"/*.md | count)"
+eq "checkpoint files never deleted by a restore" "$BEFORE" "$(ls -1 "$CPD"/*.md | count)"
 
 echo "=== 13. Payload shape: full multi-KB checkpoint survives writeSync ==="
-P13="$ROOT/p13"; mkproj "$P13"; C13="$ROOT/p13.md"
+P13="$ROOT/p13"; mkproj "$P13"; C13="$CPD/p13.md"
 { printf '## Working on: BIG\n\n### Remaining Work\n1. finish BIG\n\n'
   for i in $(seq 1 400); do printf 'padding line %d with some prose to make this multi-KB\n' "$i"; done; } > "$C13"
 (cd "$P13" && CLAUDE_CODE_SESSION_ID=s13 bash "$ARM" "$C13" >/dev/null 2>&1)
@@ -489,7 +514,7 @@ eq "checkpoint size on disk" "1" "$([ "$(wc -c < "$C13")" -gt 9000 ] && echo 1 |
 
 echo "=== 14. Hostile state dir: symlinked armed.d, control chars in paths ==="
 rm -f "$ARMD"/*.json
-P14="$ROOT/p14"; mkproj "$P14"; C14="$ROOT/p14.md"; mkcp "$C14" "SYM"
+P14="$ROOT/p14"; mkproj "$P14"; C14="$CPD/p14.md"; mkcp "$C14" "SYM"
 if [ "$CAN_SYMLINK" = 1 ]; then
 # A symlinked armed.d must not become a delete-anything primitive: readdirSync +
 # unlinkSync resolve through it, so the hook would reap *.json from the target.
@@ -511,13 +536,13 @@ fi
 if [ "$CAN_ODD_NAMES" = 1 ]; then
 # A control byte in a path yields invalid JSON, which fails SILENTLY (no restore,
 # no error) until the litter sweep reaps it a week later. arm.sh must reject it loudly.
-NLCP="$ROOT/$(printf 'we\vird').md"; mkcp "$NLCP" "CTRL" 2>/dev/null
+NLCP="$CPD/$(printf 'we\vird').md"; mkcp "$NLCP" "CTRL" 2>/dev/null
 eq "control char in checkpoint path -> rc 1" "1" \
    "$( (cd "$P14" && bash "$ARM" "$NLCP" >/dev/null 2>&1); echo $? )"
 eq "and nothing was armed" "0" "$(arms)"
 # esc() backstop: whatever reaches the flag, it must still be parseable JSON.
 BR=$ROOT/'br"anch\test'; mkproj "$BR" 2>/dev/null
-CBR="$ROOT/br.md"; mkcp "$CBR" "QUOTES"
+CBR="$CPD/br.md"; mkcp "$CBR" "QUOTES"
 (cd "$BR" && CLAUDE_CODE_SESSION_ID=s14 bash "$ARM" "$CBR" >/dev/null 2>&1)
 eq "quotes/backslashes in project path still emit valid JSON" "ok" \
    "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
@@ -540,7 +565,7 @@ else
 R15="$ROOT/anc"; mkdir -p "$R15/cfg" "$R15/evil/armed.d"
 age "$R15/evil/armed.d/precious.json"
 ln -s "$R15/evil" "$R15/cfg/context-cycle"
-P15="$ROOT/p15"; mkproj "$P15"; C15="$ROOT/p15.md"; mkcp "$C15" "ANC"
+P15="$ROOT/p15"; mkproj "$P15"; C15="$CPD/p15.md"; mkcp "$C15" "ANC"
 eq "arm.sh refuses a symlinked context-cycle/ -> rc 1" "1" \
    "$( (cd "$P15" && CLAUDE_CONFIG_DIR="$(winp "$R15/cfg")" bash "$ARM" "$C15" >/dev/null 2>&1); echo $? )"
 # Assert by NAME, not by count: the arm.sh of the day reaped the stale precious.json
@@ -562,7 +587,15 @@ else
 # The guard above must not fire here: symlinking ~/.claude into a dotfiles repo is
 # a normal setup, and refusing it would break the tool for those users.
 R16="$ROOT/dot"; mkdir -p "$R16/real-claude"; ln -s "$R16/real-claude" "$R16/claude-link"
-P16="$ROOT/p16"; mkproj "$P16"; C16="$ROOT/p16.md"; mkcp "$C16" "DOTFILES"
+# Checkpoint written THROUGH the link, into that config root's own checkpoints dir.
+# This is the shape the checkpoint-root policy has to get right for dotfiles users:
+# the flag records the link spelling, the hook derives its roots from the resolved
+# one, and the two only agree because both sides are canonicalized. Written via the
+# link on purpose — writing to real-claude directly would compare like-for-like and
+# prove nothing about that.
+P16="$ROOT/p16"; mkproj "$P16"
+mkdir -p "$R16/claude-link/context-cycle/checkpoints"
+C16="$(winp "$R16/claude-link/context-cycle/checkpoints/p16.md")"; mkcp "$C16" "DOTFILES"
 eq "arm.sh accepts a symlinked config root -> rc 0" "0" \
    "$( (cd "$P16" && CLAUDE_CONFIG_DIR="$(winp "$R16/claude-link")" CLAUDE_CODE_SESSION_ID=s16 bash "$ARM" "$C16" >/dev/null 2>&1); echo $? )"
 eq "flag landed in the real dir" "1" \
@@ -588,7 +621,7 @@ else
 # that branch deterministically.
 R17="$ROOT/wr"; mkdir -p "$R17/cfg" "$R17/victim" "$R17/bin"
 printf '#!/bin/sh\nexit 1\n' > "$R17/bin/mv"; chmod +x "$R17/bin/mv"
-P17="$ROOT/p17"; mkproj "$P17"; C17="$ROOT/p17.md"; mkcp "$C17" "WRITE"
+P17="$ROOT/p17"; mkproj "$P17"; C17="$CPD/p17.md"; mkcp "$C17" "WRITE"
 # Learn this project's real flag path, then re-run with a symlink sitting on it.
 DEST17=$( (cd "$P17" && CLAUDE_CONFIG_DIR="$(winp "$R17/cfg")" CLAUDE_CODE_SESSION_ID=s17 \
            bash "$ARM" "$C17" 2>/dev/null) | sed -n 's/^ARM_FLAG -> //p')
@@ -703,7 +736,7 @@ echo "=== 19. Same project, two path forms: the arm must still match ==="
 if [ "$CAN_SYMLINK" = 1 ]; then
   P19="$ROOT/p19"; mkproj "$P19"
   ln -s "$P19" "$ROOT/p19-link"
-  C19="$ROOT/p19.md"; mkcp "$C19" "TWOFORMS"
+  C19="$CPD/p19.md"; mkcp "$C19" "TWOFORMS"
   # Arm through the link: git reports the physical path, so arm.cwd is $ROOT/p19.
   (cd "$ROOT/p19-link" && CLAUDE_CODE_SESSION_ID=ff19-1919 bash "$ARM" "$C19" >/dev/null 2>&1)
   eq "clear at the physical path restores" \
@@ -790,7 +823,7 @@ echo "=== 19b. A project nested inside another repo reaches its own arm ==="
 # three are aimed at a different variant entirely; see the comment above them.
 if [ "$CAN_SYMLINK" = 1 ]; then
   N="$ROOT/n19"; mkdir -p "$N"; ln -s "$N" "$ROOT/n19-link"; NL="$ROOT/n19-link"
-  mkproj "$N/main"; CN="$ROOT/n19.md"
+  mkproj "$N/main"; CN="$CPD/n19.md"
 
   # A submodule-shaped repo checked out inside another repo.
   mkproj "$N/main/sub"
@@ -835,7 +868,7 @@ EOF
   # "inside the enclosing repo", not "an enclosing repo was found, so allow".
   P19X="$ROOT/p19x"; mkproj "$P19X"
   mkdir -p "$N/main/vendor"; ln -s "$P19X" "$N/main/vendor/out"
-  CX="$ROOT/p19x.md"; mkcp "$CX" "OUTSIDE"
+  CX="$CPD/p19x.md"; mkcp "$CX" "OUTSIDE"
   (cd "$P19X" && CLAUDE_CODE_SESSION_ID=ff19-b404 bash "$ARM" "$CX" >/dev/null 2>&1)
   eq "a link that leaves its repo still reaches no arm" "" "$(clear_in "$N/main/vendor/out")"
   eq "...and that arm survives the attempt" "1" "$(arms)"
@@ -881,7 +914,7 @@ echo "=== 20. Two projects differing only in case are two projects ==="
 # win32, which leaves Windows behaviour untouched.
 if [ "$CASE_SENSITIVE" = 1 ]; then
   PU="$ROOT/Pcase"; PL="$ROOT/pcase"; mkproj "$PU"; mkproj "$PL"
-  C20="$ROOT/p20.md"; mkcp "$C20" "CASEFOLD"
+  C20="$CPD/p20.md"; mkcp "$C20" "CASEFOLD"
   (cd "$PU" && CLAUDE_CODE_SESSION_ID=ff20-1010 bash "$ARM" "$C20" >/dev/null 2>&1)
   eq "an arm in Pcase is not consumed by a clear in pcase" "" "$(clear_in "$PL")"
   eq "and that arm is still armed" "1" "$(arms)"
@@ -909,6 +942,146 @@ if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 else
   skip "group 21 (tracked exec bits)" "not a git work tree — running from an export, so index modes are unavailable"
 fi
+
+echo "=== 22. checkpoint is confined to the checkpoint directories ==="
+# The arm flag used to be an arbitrary-file-READ primitive: `checkpoint` was read
+# verbatim from any absolute path and injected into model context. Measured against
+# that hook, not assumed: of the twenty assertions here, twelve fail because it
+# restored what it should have refused and three because the arm did not survive to be
+# recovered; three pass there for the wrong reason (they assert an arm count or an
+# absent injection, which a hook that already consumed the flag satisfies vacuously)
+# and two are positive controls that must pass on both. Do not upgrade that to "every
+# assertion fails against the old hook" — an earlier version of this comment did, and
+# it was wrong in both directions.
+#
+# What this group does NOT prove, and must not be read as proving: an attacker who
+# can write the flag can usually write INTO an allowed root too, and a payload placed
+# there is read exactly as before. The roots stop the arbitrary read, not the
+# injection — see TODOS.md.
+rm -f "$ARMD"/*.json
+P22="$ROOT/p22"; mkproj "$P22"
+OUTSIDE22="$ROOT/not-a-checkpoint-dir"; mkdir -p "$OUTSIDE22"
+C22="$OUTSIDE22/secret.md"; mkcp "$C22" "STOLEN"
+arm22() { (cd "$P22" && CLAUDE_CODE_SESSION_ID="$1" bash "$ARM" "$2" >/dev/null 2>&1); }
+
+arm22 s22a "$C22"
+eq "an out-of-root checkpoint is armed but not restored" "refused" "$(refused_in "$P22")"
+# The refusal has to reach the USER. Silence here is the failure mode this whole
+# project keeps finding: the /clear looks ordinary and the context never comes back.
+REFUSE22=$(node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
+   "$(winp "$P22")" | node "$HOOK")
+eq "and the user is told why, with the escape hatch named" "1" \
+   "$(case "$REFUSE22" in *"outside the known"*CONTEXT_CYCLE_CHECKPOINT_ROOTS*) echo 1;; *) echo 0;; esac)"
+eq "the refused arm is NOT consumed" "1" "$(arms)"
+eq "and nothing was injected into model context" "0" \
+   "$(case "$REFUSE22" in *additionalContext*) echo 1;; *) echo 0;; esac)"
+# Recoverability end-to-end: the same arm, still on disk, restores once the root is
+# declared. This is why a refusal must not drop the flag — a mis-derived root would
+# otherwise destroy a legitimate pending restore instead of merely delaying it.
+eq "declaring the root recovers that very arm" \
+   '✓ Restored: "STOLEN" · next: finish STOLEN (testbr)' \
+   "$(CONTEXT_CYCLE_CHECKPOINT_ROOTS="$(winp "$OUTSIDE22")" clear_in "$P22")"
+eq "...and only then is it consumed" "0" "$(arms)"
+
+# Prefix boundary: a sibling directory whose name merely STARTS with the root's is
+# not inside it. `startsWith(root)` without the separator would admit this.
+SIB22="${CPD}-evil"; mkdir -p "$SIB22"; C22B="$SIB22/x.md"; mkcp "$C22B" "SIBLING"
+arm22 s22b "$C22B"
+eq "a sibling dir sharing the root's prefix is refused" "refused" "$(refused_in "$P22")"
+rm -f "$ARMD"/*.json
+
+# Traversal: spelled inside the root, lands outside it. canon() collapses the `..`
+# when the path exists; normalize() covers it when it does not.
+C22C="$CPD/../../escape.md"; mkcp "$C22C" "TRAVERSED"
+arm22 s22c "$C22C"
+eq "a ../ traversal out of the root is refused" "refused" "$(refused_in "$P22")"
+rm -f "$ARMD"/*.json
+
+# Relative paths are refused outright rather than resolved: the base would be the
+# process cwd, which is not a trust anchor. Hand-written into the flag, because
+# arm.sh absolutizes what it is given — and the file is placed where that cwd WILL
+# find it, so the assertion exercises the refusal rather than the "checkpoint gone"
+# path it would otherwise fall into and pass for the wrong reason.
+mkcp "$P22/relnotes.md" "RELATIVE"
+cat > "$ARMD/rel22.json" <<EOF
+{ "checkpoint": "relnotes.md", "branch": "testbr", "cwd": "$(winp "$P22")", "armed_at": $(date +%s) }
+EOF
+REL22=$( cd "$P22" && node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
+   "$(winp "$P22")" | node "$HOOK" )
+eq "a relative checkpoint path is refused even when it resolves" "1" \
+   "$(case "$REL22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+eq "...and it stays armed like any other refusal" "1" "$(arms)"
+rm -f "$ARMD"/*.json "$P22/relnotes.md"
+
+# The gstack root, derived from GSTACK_HOME exactly as gstack's own bin/gstack-paths
+# does — and NOT by executing it. SKILL.md writes $GSTACK_STATE_ROOT/projects/$SLUG/
+# checkpoints, so `projects` is the root the hook has to accept.
+G22="$ROOT/gstack-home"; mkdir -p "$G22/projects/p22/checkpoints"
+C22G="$G22/projects/p22/checkpoints/g.md"; mkcp "$C22G" "GSTACK"
+arm22 s22g "$C22G"
+eq "a gstack checkpoint is refused without the env that derives its root" "refused" "$(refused_in "$P22")"
+eq "...and restores with GSTACK_HOME set" \
+   '✓ Restored: "GSTACK" · next: finish GSTACK (testbr)' \
+   "$(GSTACK_HOME="$(winp "$G22")" clear_in "$P22")"
+
+# CLAUDE_PLUGIN_DATA is only trusted when CLAUDE_PLUGIN_ROOT confirms gstack is the
+# plugin in play — gstack's own guard, kept, because another plugin's data dir can
+# reach the session env and would otherwise become a checkpoint root for free.
+arm22 s22p "$C22G"
+eq "CLAUDE_PLUGIN_DATA alone does not make a root" "refused" \
+   "$(CLAUDE_PLUGIN_DATA="$(winp "$G22")" refused_in "$P22")"
+eq "...but does when CLAUDE_PLUGIN_ROOT names gstack" \
+   '✓ Restored: "GSTACK" · next: finish GSTACK (testbr)' \
+   "$(CLAUDE_PLUGIN_DATA="$(winp "$G22")" CLAUDE_PLUGIN_ROOT="/x/plugins/gstack" clear_in "$P22")"
+rm -f "$ARMD"/*.json
+
+# A refused arm sorting FIRST must not hide a good one behind it: the good arm still
+# restores, and the banner still carries the warning. Without the second half a
+# planted flag is refused invisibly and the user sees an ordinary green banner.
+C22OK="$CPD/p22-ok.md"; mkcp "$C22OK" "LEGIT"
+arm22 s22x "$C22"; sleep 1; arm22 s22y "$C22OK"
+BOTH22=$(clear_in "$P22")
+eq "a refused arm does not block a good one behind it" "1" \
+   "$(case "$BOTH22" in '✓ Restored: "LEGIT"'*) echo 1;; *) echo 0;; esac)"
+eq "...and the successful banner still reports the refusal" "1" \
+   "$(case "$BOTH22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+eq "the refused arm is still armed after that restore" "1" "$(arms)"
+rm -f "$ARMD"/*.json
+
+if [ "$CAN_SYMLINK" = 1 ]; then
+  # A symlink sitting INSIDE an allowed root, pointing out of it. Canonicalizing the
+  # candidate is what catches this; a check on the spelling alone would admit it, and
+  # it is the shape an attacker gets for free once they can write into the root.
+  ln -s "$C22" "$CPD/looks-legit.md"
+  arm22 s22l "$CPD/looks-legit.md"
+  eq "a symlink out of the root is refused" "refused" "$(refused_in "$P22")"
+  rm -f "$CPD/looks-legit.md" "$ARMD"/*.json
+  # The hook reads the RESOLVED path, not the string the flag gave it, so the same
+  # link cannot be re-pointed out of the root between the check and the read. That
+  # swap race has no deterministic test — it needs the swap to land inside a window
+  # measured in microseconds — so this asserts the half that can be: resolving must
+  # not cost a legitimate in-root link its restore. Passes against the pre-change
+  # hook too, and is here as a regression guard rather than a discriminator.
+  C22I="$CPD/inner-target.md"; mkcp "$C22I" "INNERLINK"
+  ln -s "$C22I" "$CPD/inner-link.md"
+  arm22 s22i "$CPD/inner-link.md"
+  eq "a symlink inside the root pointing inside it still restores" \
+     '✓ Restored: "INNERLINK" · next: finish INNERLINK (testbr)' "$(clear_in "$P22")"
+  rm -f "$CPD/inner-link.md" "$C22I" "$ARMD"/*.json
+  # The mirror image, which must keep working: the root ITSELF reached through a
+  # link. Group 16 covers the config root; this covers a checkpoints dir that is a
+  # link, which canonicalizing both sides is what makes agree.
+  R22="$ROOT/cpstore"; mkdir -p "$R22"
+  mv "$CPD" "$R22/real-checkpoints"; ln -s "$R22/real-checkpoints" "$CPD"
+  C22S="$CPD/linked.md"; mkcp "$C22S" "LINKEDROOT"
+  arm22 s22s "$C22S"
+  eq "a symlinked checkpoints dir still restores" \
+     '✓ Restored: "LINKEDROOT" · next: finish LINKEDROOT (testbr)' "$(clear_in "$P22")"
+  rm -f "$CPD"; mv "$R22/real-checkpoints" "$CPD"
+else
+  skip "group 22 symlink half" "this shell/filesystem does not create real symlinks"
+fi
+rm -f "$ARMD"/*.json
 
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
