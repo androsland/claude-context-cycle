@@ -4,6 +4,26 @@
 
 Arms wait for you. Plus CI, and an installer that no longer eats your local edits.
 
+- **An arm flag with no project can no longer claim every project.** The hook treated
+  a missing or empty `cwd` as "unscoped" and fired on the next `/clear` anywhere on the
+  machine, injecting whatever file the flag named as model context under the hook's own
+  "resume from this" framing. It now fails closed. Nothing legitimate is lost: every
+  `arm.sh` ever shipped writes `git rev-parse --show-toplevel 2>/dev/null || pwd` into
+  that field, which cannot come back empty — so an absent `cwd` was never a shape this
+  tool produced. `"/"` is refused on the same path, since it normalises to empty. The
+  legacy single-slot `armed.json` gets **no** exemption, which is a deliberate
+  departure from what the security review recommended: the v1.0.0 writer emitted `cwd`
+  from that same line, so an exemption would have rescued nothing real while handing
+  the primitive back through a file in the directory an attacker already needs to
+  write. A flag stamped `armed_at: 0` is also rejected now — arms sort ascending, so
+  it used to beat every genuine arm in its project deterministically. That one has a
+  cost worth naming: a machine whose clock is still at the epoch when you arm (dead
+  RTC, no NTP yet) writes an honest flag that this discards, and the sweep then
+  deletes it rather than skipping it. The checkpoint file survives; the pending
+  restore does not. Ten new assertions, each checked to fail against the previous hook. **Still open**, and
+  recorded in `TODOS.md`: `checkpoint` is read verbatim from any absolute path, and a
+  forged flag carrying a *plausible* older timestamp still sorts first — neither is
+  reachable by a shape check, both need the provenance check.
 - **`./install.sh` actually runs now.** Both `install.sh` and `uninstall.sh` shipped
   tracked as `100644`, so the README's own clone path — `./install.sh` — failed with
   `Permission denied` on the very first step. The `curl | bash` route pipes into an
