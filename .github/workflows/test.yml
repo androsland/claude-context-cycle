@@ -18,6 +18,120 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Static analysis of the shell, which is most of this repo's executable surface.
+  # Runs on ubuntu only and deliberately not in the matrix: shellcheck parses, it does
+  # not execute, so its verdict is identical on all three platforms and a matrix here
+  # would buy three copies of one answer.
+  #
+  # This does NOT replace the suite or the manual security reads — it has no rule for
+  # a TOCTOU window or a tautological capability probe, which is what the reviews of
+  # this repo have actually turned up. It catches the quoting, expansion and
+  # exit-status class, which until now nothing checked at all.
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials:false — this job never pushes, so there is no reason to
+      # leave GITHUB_TOKEN in the runner's git config for the rest of it. The
+      # workflow-level `contents: read` above already bounds what that token could do;
+      # this is the second layer, not the first.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The runner's preinstalled shellcheck, version printed rather than pinned. It
+      # can drift under us and a new release can add a rule that fails a PR which did
+      # not touch the shell. Accepted on purpose: the failure is loud and lands in a
+      # lint job, and surfacing new rules is the point of running a linter at all. If
+      # the drift ever becomes noise, pin a release tarball here rather than dropping
+      # the step.
+      - name: Lint
+        shell: bash
+        run: |
+          shellcheck --version
+
+          # Every tracked shell script — the .sh files, plus anything whose first line
+          # is a shell shebang. Scanning shebangs rather than globbing '*.sh' alone is
+          # not hypothetical tidiness: today the two lists happen to be identical (four
+          # files), so a future script named without the extension would ship unlinted
+          # and this step would still report success. That is the silent non-coverage
+          # the step exists to end.
+          #
+          # -z / read -d '': `git ls-files` QUOTES a path containing a newline or a
+          # control byte rather than emitting it raw, so the line-oriented form would
+          # hand shellcheck a name with literal quotes in it that opens nothing. NUL
+          # separation removes the question instead of answering it.
+          #
+          # `head -1 --`: without the separator, a tracked name starting with `-` is
+          # parsed by head as an option. head errors, the redirect swallows it, the
+          # substitution comes back empty, no shebang pattern matches — and the file
+          # falls out of the list while the job still exits 0. Silently unlinted is
+          # the one outcome this step exists to prevent, so it is `--` here too.
+          FILES=()
+          while IFS= read -r -d '' f; do
+            case "$f" in *.sh) FILES+=("$f"); continue ;; esac
+            [ -f "$f" ] || continue
+            case "$(head -1 -- "$f" 2>/dev/null)" in
+              '#!'*bash*|'#!'*dash*|'#!'*ksh*|'#!'*/sh|'#!'*/sh\ *) FILES+=("$f") ;;
+            esac
+          done < <(git ls-files -z)
+
+          # Never pass an empty list: shellcheck with no file arguments reads stdin and
+          # would hang the job rather than fail it.
+          [ ${#FILES[@]} -gt 0 ] || { echo "no shell scripts found — check the discovery above" >&2; exit 1; }
+          printf 'linting %d file(s):\n' "${#FILES[@]}"
+          printf '  %s\n' "${FILES[@]}"
+
+          # Full severity (the default), minus two rules excluded by name so the tier
+          # itself stays enforced. Gating at --severity=warning instead would look
+          # stricter and be weaker: SC2086, unquoted expansion — the single most useful
+          # rule here — is classified info, and a warning gate would let it through.
+          #
+          #   SC2016  single-quoted '$' / backticks. Every hit is deliberate: `node -e`
+          #           program bodies, and fixtures asserting that a LITERAL $FILE or a
+          #           backtick in a branch name is handled. Double-quoting them would
+          #           break the tests it flags.
+          #   SC2012  `ls | count` for file counts. Only ever run against fixture
+          #           directories this suite created itself, whose names it chose; the
+          #           hostile names in group 14b are arguments arm.sh rejects and never
+          #           reach a directory that is counted. `find` here would need extra
+          #           flags to not recurse and to drop the directory itself, for no gain.
+          #
+          # Anything deliberate that is NOT one of those two carries an inline
+          # `# shellcheck disable=` with its reason at the site, which is greppable in a
+          # way a global exclude is not.
+          #
+          # --norc and -- are both load-bearing on a `pull_request` run, where every
+          # tracked file is authored by whoever opened the PR. Neither is hypothetical;
+          # both were reproduced against a real shellcheck before being added.
+          #
+          # What they do NOT cover, so nobody reads more into them than is there: a PR
+          # from a fork edits its own copy of this workflow, and `pull_request` runs the
+          # YAML as committed on the PR branch. Weakening or deleting this job outright
+          # is therefore always available to the author — it is just VISIBLE in the diff,
+          # which is the point. These two flags close the bypasses that leave the job
+          # looking green and untouched.
+          #
+          #   --norc  shellcheck reads a .shellcheckrc discovered by walking up from
+          #           each linted file to the VCS root, by default. A PR that adds a
+          #           repo-root .shellcheckrc containing `disable=SC2086` alongside a
+          #           change to arm.sh turns this whole job green while shipping an
+          #           unquoted expansion — the exact bug the tier below is chosen to
+          #           catch. Verified: exit 1 without the rc file, exit 0 with it, exit
+          #           1 again with --norc. There is no legitimate rc file here; the two
+          #           deliberate exclusions are on this command line and the rest are
+          #           per-site disable comments.
+          #   --      a tracked filename that looks like a flag is parsed as one. With
+          #           the `head --` above in place, a file named exactly
+          #           `--exclude=SC2086` carrying a shell shebang reaches this command
+          #           line, and shellcheck consumes it as an OPTION rather than a path:
+          #           verified, the run then exits 0 and a SIBLING script's real SC2086
+          #           goes unreported. With `--` it is exit 1 and both are reported.
+          #           The two separators are one fix in two places and only work
+          #           together — head's alone hands the name to shellcheck, this one
+          #           alone means discovery never produces the name to begin with.
+          shellcheck --norc --severity=style --exclude=SC2016,SC2012 -- "${FILES[@]}"
+
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

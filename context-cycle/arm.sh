@@ -100,6 +100,9 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
       CP_NODE=$(cygpath -m "$CP")
     else
       # Same conversion without GNU sed: /c/x -> C:/x, anything else untouched.
+      # shellcheck disable=SC2018,SC2019  # The case pattern already constrains this to a
+      # single ASCII letter — a drive letter. The suggested [:lower:]/[:upper:] classes
+      # buy nothing here and are locale-dependent in tr, so the ranges are the safer form.
       case "$CP" in
         /[A-Za-z]/*) CP_NODE="$(printf '%s' "$CP" | cut -c2 | tr 'a-z' 'A-Z'):${CP#/?}" ;;
       esac
