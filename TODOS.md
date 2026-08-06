@@ -74,7 +74,11 @@
   threat-model bound above still holds — this only removes a timer that happened to
   limit exposure, it does not create anything new — but it raises the value of the
   fix, because the window is now open-ended. Note the litter sweep does not close it:
-  a *well-formed* attacker flag parses fine and is never litter. (2026-08-06)
+  a *well-formed* attacker flag parses fine and is never litter. Second-order effect,
+  same bound: with no TTL, `isLive()` no longer rejects an `armed_at` far outside the
+  old ±3600s window, and candidates are sorted ascending by `armed_at`, so a planted
+  flag stamped `0` deterministically wins the race against a legitimate concurrent arm
+  in the same project instead of having to be timed. (2026-08-06)
 
 - **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
   `context-cycle/` and `armed.d/` runs at startup and again immediately before the
@@ -182,6 +186,16 @@
   checkpoint, and documented as a known limitation in README.md and CHANGELOG.md.
   Revisit if Claude Code ever exposes a pre-clear session identifier to the
   `SessionStart` hook. (concurrency fix, 2026-08-05)
+- **Drift disclosure is silently unavailable inside a linked worktree or a submodule.**
+  `currentBranch()` (hooks/context-cycle-restore.mjs) reads `.git/HEAD` directly and
+  now returns `''` on a bare `.git` FILE rather than walking up — walking up reported
+  the superproject's branch, which fabricated drift or hid it. Returning `''` is the
+  safe direction (no line beats a wrong line) but it means someone who arms and clears
+  in a worktree gets no drift warning at all, and nothing tells them the check was
+  skipped. Fix is resolving the `gitdir:` pointer and reading HEAD there; deferred as
+  a handful of extra lines on the restore path for a case that also needs an arm to
+  have been made in that worktree. Age disclosure is unaffected.
+  (security review, 2026-08-06)
 
 ## Completed
 

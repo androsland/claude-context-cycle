@@ -211,6 +211,11 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   a forgotten arm — and it is mitigated, not closed, by the age and branch-drift lines
   on any restore older than 4 hours. The mitigation is disclosure only: the restore
   still happens, and the user still has to notice.
+- **The branch-drift half of that disclosure goes quiet in a worktree or submodule.**
+  The branch is read from `.git/HEAD`, and in a linked worktree or submodule `.git` is
+  a *file* pointing at a gitdir elsewhere. Rather than walk up — which would report the
+  superproject's branch and so invent drift, or hide it — the hook reports no branch at
+  all, and says nothing about drift either way. The age line is unaffected.
 - **A subdirectory *inside* a nested repo.** The scope gate looks for `.git` in the
   clearing session's own cwd, so a `/clear` at a nested repo's root is correctly
   rejected at any depth (`repo/a/b/nested` does not match an arm taken at `repo`).

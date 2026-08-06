@@ -100,6 +100,23 @@ function clamp(s, n) {
   return s.length > n ? s.slice(0, n - 1).replace(/\s+$/, '') + '…' : s;
 }
 
+// Branch names are interpolated into the model-facing header, and a branch name is NOT
+// trusted input: checking out a fork's PR branch to review it is routine, and git
+// accepts a backtick in a ref (only ~^:?*[ , control chars, and a few structural rules
+// are rejected — verified: `git checkout -b 'fix`x`y'` succeeds and lands verbatim in
+// .git/HEAD). Unescaped, such a name closes the code span it sits in, and the header's
+// "resume from this, do not repeat work already marked done" framing is exactly what
+// makes that worth doing. Note this needs no write access to ~/.claude, so it is NOT
+// covered by the arm-flag trust boundary the rest of this file accepts.
+//
+// Keep letters and digits — \p{L}/\p{N}, so a non-ASCII branch stays readable — plus
+// the punctuation refs actually use. Everything else becomes '?'. Display only: drift
+// is decided on the RAW values, so two names that sanitize alike still count as drift.
+function safeRef(s) {
+  // '…' is allowed through because clamp() runs first and appends one; it is inert.
+  return String(s || '').replace(/[^\p{L}\p{N}._\/+@…-]/gu, '?');
+}
+
 // Best-effort parse of the /context-cycle checkpoint markdown (see the skill's
 // Step 2 template): pull "## Working on: <title>" and the first item under
 // "### Remaining Work". Returns '' for anything it can't find, so callers degrade.
@@ -312,7 +329,14 @@ function currentBranch(cwdRaw) {
   for (;;) {
     try {
       const g = join(p, '.git');
-      if (existsSync(g) && statSync(g).isDirectory()) {
+      if (existsSync(g)) {
+        // A bare `.git` FILE is a worktree or submodule whose real gitdir is elsewhere.
+        // Stop here rather than continue the walk: the next `.git` DIRECTORY up the tree
+        // belongs to the superproject or the main worktree, and reporting its branch as
+        // "the branch this session is on" is a wrong answer, not a missing one — it
+        // fabricates drift, or hides real drift, in the one place the user is being
+        // asked to trust the disclosure.
+        if (!statSync(g).isDirectory()) return '';
         const m = /^ref:\s*refs\/heads\/(.+)$/.exec(readFileSync(join(g, 'HEAD'), 'utf8').trim());
         return m ? m[1] : '';
       }
@@ -421,7 +445,9 @@ if (body.length > MAX) {
 let confirmLine = '✓ Restored';
 confirmLine += title ? `: "${clamp(title, 60)}"` : ' context via /context-cycle';
 if (nextStep) confirmLine += ` · next: ${clamp(nextStep, 80)}`;
-if (chosen.arm.branch) confirmLine += title ? ` (${chosen.arm.branch})` : ` (branch: ${chosen.arm.branch})`;
+const armedBranchRaw = chosen.arm.branch ? clamp(String(chosen.arm.branch), 60) : '';
+const armedBranch = safeRef(armedBranchRaw);
+if (armedBranch) confirmLine += title ? ` (${armedBranch})` : ` (branch: ${armedBranch})`;
 
 // Staleness disclosure. Arms do not expire, so a checkpoint can now be arbitrarily
 // old — that is the point, and the AFK case is exactly what it is for. The one way
@@ -439,9 +465,9 @@ const STALE_AFTER = 4 * 3600;
 const ageSeconds = now - chosen.arm.armed_at;
 const ageLabel = humanAge(ageSeconds);
 const isOld = ageSeconds >= STALE_AFTER && !!ageLabel;
-const armedBranch = chosen.arm.branch ? clamp(String(chosen.arm.branch), 60) : '';
-const nowBranch = clamp(currentBranch(payload.cwd), 60);
-const drifted = !!armedBranch && !!nowBranch && armedBranch !== nowBranch;
+const nowBranchRaw = clamp(currentBranch(payload.cwd), 60);
+const nowBranch = safeRef(nowBranchRaw);
+const drifted = !!armedBranchRaw && !!nowBranchRaw && armedBranchRaw !== nowBranchRaw;
 
 if (isOld) confirmLine += ` · ${ageLabel} old`;
 if (drifted) confirmLine += ` · now on ${nowBranch}`;
@@ -451,7 +477,7 @@ const header =
   'The previous conversation was saved and cleared via /context-cycle to free the ' +
   'context window. Below is the saved working state — resume from the "Remaining ' +
   'Work" section and do not repeat work already marked done.\n' +
-  (chosen.arm.branch ? `Saved on branch: ${chosen.arm.branch}\n` : '') +
+  (armedBranch ? `Saved on branch: ${armedBranch}\n` : '') +
   (isOld ? `Saved ${ageLabel} ago.\n` : '') +
   (drifted
     ? `\n**The branch has changed since this was saved** — it was written on ` +

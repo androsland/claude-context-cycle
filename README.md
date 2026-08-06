@@ -122,7 +122,10 @@ where `/context-restore` and `/context-save list` can find them too.
 - **Stale restores announce themselves.** Because an arm can now be days old, a
   restore older than 4 hours says so, and one whose branch has moved since says that
   too — in the banner you see *and* in the context the model gets, so an out-of-date
-  plan gets re-checked instead of resumed on faith.
+  plan gets re-checked instead of resumed on faith. (Branch names are sanitized before
+  either channel sees them; git allows a backtick in a ref, and that name would
+  otherwise land unescaped in the model's context.) Inside a linked worktree or a
+  submodule the branch can't be read cheaply, so drift simply goes unreported there.
 - **Bounded on disk anyway.** Corrupt flags and abandoned temp files are swept after
   7 days, so `armed.d/` can't grow without bound. That is garbage collection, and it
   is deliberately not the same clock as an arm's lifetime.
@@ -179,10 +182,11 @@ checkpoints are kept — delete them yourself if you want them gone.
 bash test/run-tests.sh
 ```
 
-122 assertions across 22 groups, on a machine where every capability probe passes —
+126 assertions across 24 groups, on a machine where every capability probe passes —
 fewer where the filesystem can't do symlinks or odd filenames, and the run reports each
 group it skipped by name. Covers concurrent arms, project scoping, arm lifetime and
 staleness disclosure, litter collection,
+untrusted branch names reaching the model context,
 `arm.sh` argument validation, fail-closed payload handling, legacy-flag migration,
 full multi-KB payload delivery, a hostile state dir (symlinked `armed.d` or its
 parent, a symlink pre-placed on the flag path, control characters in paths), and a
