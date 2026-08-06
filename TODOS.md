@@ -65,6 +65,29 @@
   old ±3600s window, and candidates are sorted ascending by `armed_at`, so a planted
   flag stamped `0` deterministically wins the race against a legitimate concurrent arm
   in the same project instead of having to be timed. (2026-08-06)
+  **Update: two of the three fields are now constrained; `checkpoint` is not.**
+  `scopeAllows()` fails closed on a missing, empty or `/`-shaped `cwd` instead of
+  matching every project, and `isLive()` rejects a non-positive `armed_at`, so the
+  laziest forgery no longer sorts ahead of every real arm. Ten assertions in group 11b
+  cover it, each verified to fail against the pre-change hook. **The recommended
+  legacy-`armed.json` exemption was deliberately NOT implemented, and the
+  recommendation was wrong** — v1.0.0's `arm.sh` wrote `cwd` from the same
+  `git rev-parse --show-toplevel 2>/dev/null || pwd` line the current one uses, so it
+  cannot produce an empty value and the exemption would have rescued nothing that
+  exists. It would have restored the primitive outright: `armed.json` sits in the
+  directory an attacker must already be able to write to. What is left open is the
+  first field — `checkpoint` is still read verbatim from any absolute path — plus the
+  fact that a forged flag with a *plausible* older `armed_at` still sorts first, which
+  no shape check can catch. Both need the provenance check this entry is really about.
+  Constraining `checkpoint` is blocked on a design question, not on effort: the hook
+  knows only `$CLAUDE_DIR/context-cycle/checkpoints/$SLUG`, while `SKILL.md` also
+  writes to `$GSTACK_STATE_ROOT/projects/$SLUG/checkpoints` when gstack is installed,
+  and confining to the first silently breaks gstack users while teaching the hook the
+  second means shelling out to a gstack binary — which the hook refuses to do on
+  principle (see the "Reads `.git/HEAD` directly instead of shelling out" note above
+  `currentBranch()` in hooks/context-cycle-restore.mjs; cited by name rather than line,
+  because the first version of this entry cited a range that its own commit shifted).
+  (2026-08-06)
 
 - **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
   `context-cycle/` and `armed.d/` runs at startup and again immediately before the

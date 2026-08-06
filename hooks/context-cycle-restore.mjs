@@ -183,8 +183,30 @@ function readArm(p) {
 // A far-future stamp is no longer junk on its own — with no upper bound there is
 // nothing for it to be junk relative to, and clock skew across a suspend/resume or a
 // restored VM snapshot is an honest way to get one. It can only affect sort order.
+//
+// It must also be POSITIVE. arm.sh stamps `date +%s`, and the sort below is
+// ascending — a planted flag stamped 0 would otherwise beat every legitimate arm in
+// its project on every /clear, deterministically, rather than having to win a race it
+// might lose.
+//
+// Accepted cost, because this is not quite "no honest flag can look like that": a
+// machine whose clock is still at the epoch when the arm is written — dead RTC, no
+// NTP yet, ordinary enough on a headless box — produces a genuine flag that this
+// rejects, and sweep() then deletes it rather than merely skipping it. The checkpoint
+// file survives, the pending restore does not. It is the same fate every other
+// malformed armed_at has always had, and it errs toward losing a restore rather than
+// firing a planted one, which is the correct direction for a hook that injects into
+// model context.
+//
+// This closes one shape, not the class: a forged flag carrying a plausible older
+// timestamp still sorts first, and nothing here can tell it from a real one. Sort
+// position stays attacker-influenceable until the flag itself is provenance-checked
+// (TODOS.md, "an arm flag on disk is trusted wholesale"). Losing the sort costs an
+// attacker one cycle anyway — the flag stays on disk and is a candidate again at the
+// next /clear.
 function isLive(arm, now) {
   if (!arm || typeof arm.armed_at !== 'number' || !Number.isFinite(arm.armed_at)) return false;
+  if (arm.armed_at <= 0) return false;
   if (!ARM_TTL_SECONDS) return true;
   const age = now - arm.armed_at;
   return age <= ARM_TTL_SECONDS && age > -ARM_TTL_SECONDS;
@@ -359,8 +381,29 @@ function humanAge(seconds) {
   return `${Math.floor(hours / 24)}d`;
 }
 
+// An arm whose `cwd` is missing, empty or unusable is REFUSED, not treated as
+// project-wide. It used to match the next /clear in ANY project, which turned a
+// hand-written flag into a prompt-injection primitive: attacker-chosen file content
+// injected as additionalContext under this hook's own "resume from this" framing.
+//
+// Refusing costs nothing real, because no arm.sh has ever written a flag without
+// this field. Every version back to v1.0.0's single-slot armed.json writes
+// `git rev-parse --show-toplevel 2>/dev/null || pwd`, which cannot produce an empty
+// string — so absence is not a shape this tool emits, it is a shape someone else
+// wrote.
+//
+// DELIBERATELY no exemption for the legacy armed.json. The review that found this
+// suggested one, to keep a pre-upgrade cycle from stranding; the legacy writer
+// emitted `cwd` from that same line, so the exemption would rescue nothing that
+// exists and would hand the primitive straight back — armed.json sits in the very
+// directory an attacker needs to write to plant an armed.d flag in the first place.
+//
+// Fallout accepted: "/" normalises to '' here, so a cycle armed with the filesystem
+// root as its project is refused too. `git rev-parse --show-toplevel` cannot return
+// it from a real repo, and "every project on the machine" is precisely the reading
+// this function must stop.
 function scopeAllows(armedCwd, curCwdRaw) {
-  if (!norm(armedCwd)) return true;
+  if (!norm(armedCwd)) return false;
   const a = norm(canon(armedCwd));
   const cRaw = canon(curCwdRaw);
   const c = norm(cRaw);

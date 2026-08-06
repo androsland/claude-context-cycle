@@ -430,6 +430,62 @@ eq "clear in an unrelated dir does not fire" "" "$(clear_in "$ROOT/p2a")"
 eq "arm survives that too" "1" "$(arms)"
 rm -f "$ARMD"/*.json
 
+echo "=== 11b. A hand-written flag cannot claim every project, or jump the queue ==="
+# Nothing here is reachable through arm.sh: every version of it writes
+# `git rev-parse --show-toplevel || pwd` into cwd and `date +%s` into armed_at, so a
+# flag missing the first or non-positive in the second was written by something else.
+# Both used to be honoured — a missing cwd matched the NEXT /clear in any project at
+# all, and armed_at:0 sorts ahead of every real arm. Together that is one flag that
+# fires wherever the user happens to clear next and wins if a real arm is also
+# waiting. Each assertion below fails against the pre-change hook.
+P11c="$ROOT/p11c"; mkproj "$P11c"; C11c="$ROOT/p11c.md"; mkcp "$C11c" "PLANTED"
+plant() { printf '{ "checkpoint": "%s", "branch": "testbr", %s }\n' \
+  "$(winp "$C11c")" "$2" > "$1"; }
+
+# (a) cwd absent entirely -> refused, in a project that has nothing to do with it.
+plant "$ARMD/zz-nocwd.json" "\"armed_at\": $(date +%s)"
+eq "flag with NO cwd does not fire"        "" "$(clear_in "$P11c")"
+eq "...and is left on disk, not consumed"  "1" "$(arms)"
+rm -f "$ARMD"/*.json
+
+# (b) the two shapes that reach the same fail-open branch by normalising to empty.
+for shape in '"cwd": ""' '"cwd": "/"'; do
+  plant "$ARMD/zz-empty.json" "$shape, \"armed_at\": $(date +%s)"
+  eq "flag with $shape does not fire" "" "$(clear_in "$P11c")"
+  rm -f "$ARMD"/*.json
+done
+
+# (c) the legacy single-slot file gets NO exemption. Group 5 covers the migration
+# path that matters (a legacy flag WITH a cwd is still consumed); this asserts the
+# exemption a reviewer suggested for it was not granted, because armed.json lives in
+# the same directory an attacker would already be writing to.
+plant "$CLAUDE_CONFIG_DIR/context-cycle/armed.json" "\"armed_at\": $(date +%s)"
+eq "legacy armed.json with NO cwd does not fire" "" "$(clear_in "$P11c")"
+rm -f "$CLAUDE_CONFIG_DIR/context-cycle/armed.json"
+
+# (d) armed_at must be positive. Correct cwd this time, so scope is not what refuses.
+for stamp in 0 -1; do
+  plant "$ARMD/zz-stamp.json" "\"cwd\": \"$(winp "$P11c")\", \"armed_at\": $stamp"
+  eq "flag with armed_at:$stamp does not fire" "" "$(clear_in "$P11c")"
+  rm -f "$ARMD"/*.json
+  # The reap is asserted on a NON-clear start, where no restore can consume the flag.
+  # After a /clear it would read 0 on the pre-change hook too — because the flag FIRED
+  # and was consumed — so the obvious version of this assertion passes vacuously and
+  # proves nothing. Here the pre-change hook leaves the file sitting there.
+  plant "$ARMD/zz-stamp.json" "\"cwd\": \"$(winp "$P11c")\", \"armed_at\": $stamp"
+  printf '{"source":"startup","cwd":"%s"}' "$(winp "$P11c")" | node "$HOOK" >/dev/null 2>&1
+  eq "...and a non-clear start sweeps it as malformed" "0" "$(arms)"
+  rm -f "$ARMD"/*.json
+done
+
+# (e) the point of (d): a real arm in the same project must win, not merely coexist.
+# Pre-change, armed_at:0 sorts first and PLANTED is restored instead of REAL.
+C11d="$ROOT/p11d.md"; mkcp "$C11d" "REAL"
+(cd "$P11c" && CLAUDE_CODE_SESSION_ID=s11c bash "$ARM" "$C11d" >/dev/null 2>&1)
+plant "$ARMD/zz-race.json" "\"cwd\": \"$(winp "$P11c")\", \"armed_at\": 0"
+eq "a real arm beats a flag stamped 0" '✓ Restored: "REAL" · next: finish REAL (testbr)' "$(clear_in "$P11c")"
+rm -f "$ARMD"/*.json
+
 echo "=== 12. Vanished checkpoint: skip to the next arm, never delete a checkpoint ==="
 P12="$ROOT/p12"; mkproj "$P12"
 G="$ROOT/p12-gone.md"; K="$ROOT/p12-kept.md"; mkcp "$G" "GONE"; mkcp "$K" "KEPT"
