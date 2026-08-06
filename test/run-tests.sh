@@ -40,7 +40,7 @@ ARMD="$CLAUDE_CONFIG_DIR/context-cycle/armed.d"
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n     expected: %s\n     actual:   %s\n' "$1" "$2" "$3"; }
-eq()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
+eq()   { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 
 # A skipped group is reported by name and re-listed in the summary. A suite that
 # quietly drops a third of itself on one platform reads as full coverage.
@@ -152,7 +152,10 @@ clear_in() {
 hook_raw() { node "$HOOK"; }
 mkcp() { printf '## Working on: %s\n\n### Remaining Work\n1. finish %s\n' "$2" "$2" > "$1"; }
 mkproj() { mkdir -p "$1"; git -C "$1" init -q -b testbr 2>/dev/null; git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null; }
-arms() { ls -1 "$ARMD" 2>/dev/null | grep -c '\.json$' || true; }
+# Count arm flags by glob rather than `ls | grep -c` (SC2010): the glob asks the shell
+# the question directly instead of pattern-matching ls output, and it drops the `|| true`
+# that was only there to swallow grep's exit 1 on a zero count.
+arms() { local n=0 f; for f in "$ARMD"/*.json; do [ -e "$f" ] && n=$((n+1)); done; echo "$n"; }
 
 echo "=== 1. THE REPORTED BUG: two sessions, same project, interleaved ==="
 P="$ROOT/p1"; mkproj "$P"
@@ -215,6 +218,8 @@ eq "old garbage reaped by sweep" "absent" "$([ -e "$CLAUDE_CONFIG_DIR/context-cy
 
 echo "=== 7. arm.sh rejects everything that used to silently fall back ==="
 P7="$ROOT/p7"; mkproj "$P7"; C7="$ROOT/p7.md"; mkcp "$C7" "GOOD"
+# shellcheck disable=SC2069  # The order is deliberate: stderr to the capture, stdout to
+# /dev/null. arm.sh writes its refusals to stderr and these assertions read the message.
 try() { (cd "$P7" && bash "$ARM" "$1" 2>&1 >/dev/null); }
 rc()  { (cd "$P7" && bash "$ARM" "$1" >/dev/null 2>&1); echo $?; }
 eq "no arg at all -> rc 1"      "1" "$( (cd "$P7" && bash "$ARM" >/dev/null 2>&1); echo $? )"
@@ -295,7 +300,7 @@ eq "CONTEXT_CYCLE_TTL=0 means no bound"     '✓ Restored: "OLD" · next: finish
 arm8 7200 ""
 eq "CONTEXT_CYCLE_TTL=junk means no bound"  '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL=wat clear_in "$P8")"
 arm8 7200 ""
-eq "CONTEXT_CYCLE_TTL='' means no bound"    '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL= clear_in "$P8")"
+eq "CONTEXT_CYCLE_TTL='' means no bound"    '✓ Restored: "OLD" · next: finish OLD' "$(CONTEXT_CYCLE_TTL='' clear_in "$P8")"
 
 echo "=== 8b. Branch drift is disclosed to the user AND to the model ==="
 # The one way a never-expiring arm bites: the checkpoint describes a branch that has
@@ -560,7 +565,7 @@ rm -f "$DEST17"; ln -s "$R17/victim/dest.txt" "$DEST17"
 eq "cp fallback does not write through a symlinked flag path" "PRECIOUS" \
    "$(cat "$R17/victim/dest.txt")"
 eq "the flag path is a real file afterwards" "file" \
-   "$([ -L "$DEST17" ] && echo LINK || { [ -f "$DEST17" ] && echo file || echo missing; })"
+   "$(if [ -L "$DEST17" ]; then echo LINK; elif [ -f "$DEST17" ]; then echo file; else echo missing; fi)"
 eq "the fallback still arms correctly" "WRITE" \
    "$(node -e 'const fs=require("fs");
       const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
@@ -568,7 +573,7 @@ eq "the fallback still arms correctly" "WRITE" \
 # mktemp names are random, so the guarantee to assert is that none are left behind:
 # a stranded temp would otherwise sit under a name the old *.json sweep never reaped.
 eq "no temp file left behind" "0" \
-   "$(ls -1a "$R17/cfg/context-cycle/armed.d" | grep -c '^\.tmp\.' || true)"
+   "$(n=0; for f in "$R17/cfg/context-cycle/armed.d"/.tmp.*; do [ -e "$f" ] && n=$((n+1)); done; echo "$n")"
 fi
 
 echo "=== 18. install.sh: idempotent, and never silently reverts a local edit ==="
@@ -578,7 +583,7 @@ echo "=== 18. install.sh: idempotent, and never silently reverts a local edit ==
 # curl branch is never taken and this stays offline.
 I="$(winp "$ROOT/inst")"; mkdir -p "$ROOT/inst"
 inst() { (CLAUDE_CONFIG_DIR="$I" bash "$REPO/install.sh" 2>&1); }
-OUT18=$(inst); eq "install exits 0" "0" "$?"
+inst >/dev/null; eq "install exits 0" "0" "$?"
 eq "skill installed"    "1" "$([ -f "$ROOT/inst/skills/context-cycle/SKILL.md" ] && echo 1 || echo 0)"
 eq "arm.sh installed"   "1" "$([ -f "$ROOT/inst/skills/context-cycle/arm.sh" ] && echo 1 || echo 0)"
 eq "hook installed"     "1" "$([ -f "$ROOT/inst/hooks/context-cycle-restore.mjs" ] && echo 1 || echo 0)"

@@ -2,20 +2,6 @@
 
 ## Testing
 
-- **No linter ever looks at the shell, which is most of this repo.** `arm.sh`,
-  `install.sh`, `uninstall.sh` and `test/run-tests.sh` are the bulk of the executable
-  surface, and the CI job only *runs* the suite — it does not lint any of them.
-  Successive security reviews have leaned on manual reading for the shell precisely
-  because shellcheck was not installed to back them up, which makes their scanner
-  lists read stronger than the coverage actually is. Not a claim that it would have
-  caught anything in this PR — it would not have: the defects here were a tautological
-  capability probe and two check-then-use windows, and shellcheck has no rule for
-  either. The point is narrower and duller. The quoting, expansion and exit-status
-  mistakes it *does* catch are currently caught by nobody, on four scripts that run
-  with the user's privileges and write into `~/.claude`. Fix is a `shellcheck` step in
-  `.github/workflows/test.yml` — cheap, but it will surface a first-run backlog on
-  files nobody has ever linted, so it wants its own PR rather than being bolted onto
-  this one. (security review, 2026-08-06)
 - **The symlink-dependent groups never run on Windows.** That is groups 14a, 15, 16,
   17 and 19 in full, plus group 18's symlink-refusal half — six skips. Git Bash
   turns `ln -s` into a copy unless `MSYS=winsymlinks:nativestrict` is set, which
@@ -231,6 +217,43 @@
 
 ## Completed
 
+- **shellcheck now runs in CI over every tracked shell script.** A `lint` job in
+  `.github/workflows/test.yml`, ubuntu-only because static analysis returns the same
+  verdict on every platform. Gated at full severity minus `SC2016` and `SC2012`, both
+  excluded by name with their reasons in the workflow, rather than at
+  `--severity=warning` — that tier looks stricter and is weaker, because `SC2086`
+  (unquoted expansion) is classified *info*. Verified rather than assumed: a planted
+  `rm -rf $f` fails the gate as configured and passes a warning-tier gate. The
+  first-run backlog was 22 findings across two files — `install.sh` and `uninstall.sh`
+  were already clean. Five were warnings and are fixed (`eq()` and one ternary rewritten
+  to `if`/`else`, `arms()` and the temp-file count moved from `ls | grep -c` to globs,
+  an unused capture dropped, `CONTEXT_CYCLE_TTL=` made explicit as `=''`); two
+  deliberate idioms carry inline `# shellcheck disable=` with reasons at the site — the
+  `2>&1 >/dev/null` stderr capture in group 7, and `tr 'a-z' 'A-Z'` on a drive letter in
+  `arm.sh`. Suite unchanged at 128/0/0 before and after. **What it does not cover:** it
+  has no rule for a TOCTOU window or a tautological capability probe, which is what the
+  reviews of this repo have actually found — it does not retire the manual read, and the
+  shell in `SKILL.md`'s fenced blocks is not linted by it. The runner's shellcheck is
+  unpinned and can drift. (2026-08-06)
+  **The gate is hardened against quiet tampering by the PR it is judging**, which the
+  security review of this change caught and which matters because the job runs on
+  `pull_request` over author-controlled files. shellcheck reads a `.shellcheckrc` found
+  by walking up to the VCS root *by default*, so a PR could add one at the repo root
+  disabling `SC2086` and turn its own lint green — reproduced, and closed with `--norc`.
+  The flag-shaped-filename hazard is two coupled bugs, and the first pass described it
+  wrongly — worth recording, since the fix looked complete and was not. As first
+  written, a tracked file named `--exclude=SC2086` never reached shellcheck at all:
+  `head -1 "$f"` in the shebang scan errored on the leading dash, the substitution came
+  back empty, and the file fell out of the list — silently unlinted, job green. Adding
+  `head -1 -- "$f"` lets it through, and only *then* does shellcheck parse it as an
+  option: verified, exit 0 with a SIBLING script's real SC2086 unreported. Both
+  separators are needed; either alone leaves a hole. Discovery is NUL-separated so a
+  quoted path from `git ls-files` cannot reach the linter as a name that opens nothing.
+  `persist-credentials` is off on the checkout: the job never pushes. Residual,
+  accepted: the runner's shellcheck is unpinned, so its own supply chain is GitHub's
+  image, not ours — and a fork PR can rewrite or delete the `lint:` job in its own copy
+  of the workflow, which no flag on that job can prevent; the defence there is only
+  that it shows up in the diff. (security review, 2026-08-06)
 - **Concurrency fix: per-(project, session) arm flags.** Replaced the single global
   `armed.json` with `armed.d/<project-hash>-<session-id>.json`, deleted the
   `.pending-file` fallback, made the hook fail closed on an unreadable payload, and

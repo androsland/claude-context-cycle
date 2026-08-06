@@ -49,6 +49,37 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
 
 - **The test suite runs in CI** on ubuntu, macOS and Windows (Git Bash), on every
   push and pull request. Nothing ran it before except a human remembering to.
+- **And the shell is linted there now.** Shell is most of this repo's executable
+  surface — four scripts that run with your privileges and write into `~/.claude` —
+  and CI only ever *ran* them. A `shellcheck` job now reads every tracked shell script
+  on every push and pull request. It is gated at full severity minus two rules
+  excluded by name in the workflow, not at `--severity=warning`: that tier reads as
+  stricter but is weaker, because unquoted expansion (`SC2086`) is classified *info*
+  and would sail through it — confirmed by planting an unquoted `rm -rf $f` and
+  watching each gate. The first run found 22 things across two files; `install.sh` and
+  `uninstall.sh` were already clean. All are resolved, the deliberate ones with an
+  inline `# shellcheck disable=` carrying its reason at the site. Discovery is by
+  shebang as well as by `*.sh`, so a future script named without the extension cannot
+  ship unlinted while the job still reports success. No behaviour changed: the suite
+  reads 128 passed, 0 failed either side of it. It does not replace the manual
+  security reads — shellcheck has no rule for a check-then-use window, which is what
+  those reads have actually been finding.
+- **And the lint job gives the pull request it is judging no quiet way to switch it
+  off.** A gate that runs on `pull_request` reads files the PR author wrote, so two of
+  shellcheck's own defaults were exploitable and both were reproduced before being
+  closed. shellcheck discovers a `.shellcheckrc` by walking up to the VCS root by
+  default, so a PR adding a repo-root `.shellcheckrc` with `disable=SC2086` next to a
+  change to `arm.sh` turned the job green while shipping an unquoted expansion —
+  `--norc` now. And a filename that looks like a flag is parsed as one, in two places
+  that only bite in sequence: `head`, reading the shebang, errors on a name starting
+  with `-` and the file drops out of the list unlinted; once `head --` lets it through,
+  shellcheck consumes a file named exactly `--exclude=SC2086` as an *option* and exits
+  0 with a *sibling* script's real finding unreported. Both take `--` now. Discovery is
+  NUL-separated for the same family of reason, since `git ls-files` quotes a path
+  containing a newline instead of emitting it raw. Verified against a real shellcheck,
+  before and after. Not covered, because it cannot be: a fork PR edits its own copy of
+  the workflow, so weakening or deleting the job outright stays available — that is
+  visible in the diff, which is the difference.
 - **`install.sh` refuses to install through a symlink — at the file, at its `.bak`,
   or at the directory above it.** `cp` resolves a link in both directions: the new
   backup step would copy the link *target's* contents out to a predictable `.bak`
