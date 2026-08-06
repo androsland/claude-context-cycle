@@ -182,7 +182,8 @@ checkpoints are kept — delete them yourself if you want them gone.
 bash test/run-tests.sh
 ```
 
-126 assertions across 24 groups, on a machine where every capability probe passes —
+126 assertions across 24 groups, on a machine and a path where every capability probe
+passes —
 fewer where the filesystem can't do symlinks or odd filenames, and the run reports each
 group it skipped by name. Covers concurrent arms, project scoping, arm lifetime and
 staleness disclosure, litter collection,

@@ -215,7 +215,10 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   The branch is read from `.git/HEAD`, and in a linked worktree or submodule `.git` is
   a *file* pointing at a gitdir elsewhere. Rather than walk up — which would report the
   superproject's branch and so invent drift, or hide it — the hook reports no branch at
-  all, and says nothing about drift either way. The age line is unaffected.
+  all, and says nothing about drift either way. The age line is unaffected. Separately,
+  and worse: if that worktree sits *inside* its main repo and the path crosses a symlink
+  or a Windows short name, the scope guard refuses the arm outright and nothing restores
+  at all. Pre-existing, recorded under Restore semantics in `TODOS.md`.
 - **A subdirectory *inside* a nested repo.** The scope gate looks for `.git` in the
   clearing session's own cwd, so a `/clear` at a nested repo's root is correctly
   rejected at any depth (`repo/a/b/nested` does not match an arm taken at `repo`).

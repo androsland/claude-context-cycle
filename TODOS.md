@@ -198,6 +198,26 @@
   checkpoint, and documented as a known limitation in README.md and CHANGELOG.md.
   Revisit if Claude Code ever exposes a pre-clear session identifier to the
   `SessionStart` hook. (concurrency fix, 2026-08-05)
+- **A project nested inside another repo is refused when its path crosses a symlink or
+  an 8.3 short name.** `scopeAllows()`'s aliasing guard runs only when the clearing
+  cwd's raw and canonical forms differ, and `rawEnclosingRepo()` deliberately starts at
+  the PARENT — so where the forms differ it finds the OUTER repo, judges it "not the
+  armed project", and refuses. The armed and clearing cwd being the *identical string*
+  does not save it; the guard never compares them. Pre-existing (it came in with the
+  aliasing fix), not caused by the arm-lifetime work — found because group 8e's
+  worktree fixture tripped it on the macOS and Windows CI runners. Reproduced on one
+  Linux box, which is the point: it is a property of the PATH, not the OS. Same
+  fixture, same shell — `/tmp/link/proj/wt` refused, `/tmp/real/proj/wt` restored.
+  Real-world shapes: `git worktree add ./wt/x` inside the main repo, a submodule you
+  arm in directly, or any project under a symlinked prefix (`~/code` → another volume,
+  macOS `/var`, a Windows temp path). The failure is silent — the clear looks like any
+  other clear, which is the same class of defect the TTL removal just fixed. A fix has
+  to distinguish "the raw path traversed a symlink *below* the enclosing repo" (the
+  attack the guard exists for) from "a symlink sits somewhere in the prefix" (benign,
+  and common); deferred because narrowing a security guard needs its own review round,
+  not a tail-end commit on this branch. Group 8e is probe-gated on
+  `CAN_NESTED_SCOPE` and reports itself skipped where this bites.
+  (CI on PR #3, 2026-08-06)
 - **Drift disclosure is silently unavailable inside a linked worktree or a submodule.**
   `currentBranch()` (hooks/context-cycle-restore.mjs) reads `.git/HEAD` directly and
   now returns `''` on a bare `.git` FILE rather than walking up — walking up reported

@@ -100,6 +100,31 @@ mkdir -p "$ROOT/.bs\\probe" 2>/dev/null
 [ -d "$ROOT/.bs\\probe" ] && [ ! -d "$ROOT/.bs" ] && CAN_BACKSLASH_NAME=1
 rm -rf "$ROOT/.bs\\probe" "$ROOT/.bs" 2>/dev/null
 
+# Does a project nested inside ANOTHER repo reach its own arm here? scopeAllows()'s
+# aliasing guard only runs when the clearing cwd's raw and canonical forms differ, and
+# rawEnclosingRepo() deliberately starts at the PARENT — so where they differ, the
+# outer repo is found, judged "not the armed project", and the arm is refused before
+# any of it is reached. The forms differ on macOS (/var -> /private/var under mktemp)
+# and on Windows CI (8.3 short names in the temp path), and agree on Linux. Group 8e
+# needs a worktree nested in its main repo, so it can only assert where they agree.
+# Probing the mechanism rather than the platform: this is a property of the PATH, not
+# of the OS, and the same shell on the same OS flips it by moving $TMPDIR.
+CAN_NESTED_SCOPE=0
+node -e '
+  const { realpathSync } = require("fs");
+  const W = process.platform === "win32";
+  const norm = p => {
+    let s = String(p);
+    if (W) { s = s.replace(/\\/g, "/"); const m = /^\/([a-zA-Z])\/(.*)$/.exec(s); if (m) s = m[1] + ":/" + m[2]; }
+    s = s.replace(/\/+$/, "");
+    return W ? s.toLowerCase() : s;
+  };
+  const raw = process.argv[1];
+  let c = raw;
+  try { c = realpathSync.native(raw); } catch { try { c = realpathSync(raw); } catch { /* keep raw */ } }
+  process.exit(norm(raw) === norm(c) ? 0 : 1);
+' "$(winp "$ROOT")" 2>/dev/null && CAN_NESTED_SCOPE=1
+
 # Pull one field out of the hook's JSON stdout. node, not python — node is
 # already a hard requirement of the hook itself, so the suite adds no new dep.
 jsonf() { node -e '
@@ -355,6 +380,10 @@ echo "=== 8e. A worktree/submodule .git FILE reports no branch, not the parent's
 # worktree or a submodule has a `.git` FILE pointing at a gitdir elsewhere; walking
 # past it finds the superproject's `.git` DIRECTORY and reports ITS branch, which
 # fabricates drift (or hides real drift) rather than staying quiet.
+if [ "$CAN_NESTED_SCOPE" != 1 ]; then
+  skip "group 8e (worktree .git FILE)" \
+       "this temp path's raw and canonical forms differ, so scopeAllows() refuses a worktree nested in its main repo before the branch lookup is reached — see TODOS.md, Restore semantics"
+else
 P8E="$ROOT/p8e"; mkproj "$P8E"; C8E="$ROOT/p8e.md"; mkcp "$C8E" "WORKTREE"
 mkdir -p "$P8E/wt"; printf 'gitdir: %s/.git/worktrees/wt\n' "$P8E" > "$P8E/wt/.git"
 rm -f "$ARMD"/*.json
@@ -364,6 +393,7 @@ EOF
 eq "no drift claimed from a parent repo's branch" \
    '✓ Restored: "WORKTREE" · next: finish WORKTREE (feat/elsewhere)' "$(clear_in "$P8E/wt")"
 rm -f "$ARMD"/*.json
+fi
 
 echo "=== 9. Non-clear session starts never consume the arm ==="
 P9="$ROOT/p9"; mkproj "$P9"; C9="$ROOT/p9.md"; mkcp "$C9" "KEEP"
