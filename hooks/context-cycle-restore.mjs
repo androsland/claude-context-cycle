@@ -152,19 +152,52 @@ function stateDirUsable() { return realDir(stateDir); }
 function armDirUsable() { return realDir(stateDir) && realDir(armDir); }
 
 // Every arm-flag file on disk: the per-(project, session) files plus a legacy
-// single-slot armed.json if one is still lying around.
-function armPaths() {
-  const out = [];
-  if (!stateDirUsable()) return out;
-  if (existsSync(legacyArmedPath)) out.push(legacyArmedPath);
-  if (!armDirUsable()) return out;
+// single-slot armed.json if one is still lying around. Split into the ones that are
+// REGULAR FILES and the ones that are not, because a link here is not a flag.
+//
+// Both readFileSync (content) and statSync (the ordering key, see armOrder) follow a
+// symlink and report the TARGET. So a symlinked entry grafts a fresh directory entry
+// onto an inode the attacker touched at a time of their choosing, which is exactly
+// the forgery armOrder() exists to stop — and it needs no race and no backdating.
+// Reproduced against this hook: a flag staged outside armed.d and left alone, then
+// symlinked into armed.d two seconds AFTER a legitimate arm, still sorted first and
+// restored the attacker's checkpoint. The link's OWN lstat ctime was correct; nothing
+// was reading it. A hardlink is not the same problem — link() is a metadata write and
+// moves the inode's ctime forward, measured alongside.
+//
+// Refusing outright rather than ordering by the link's own ctime: `arm.sh` writes
+// through mktemp + rename and has never produced anything but a regular file, the
+// legacy writer likewise, and this file already refuses a symlinked `context-cycle/`
+// or `armed.d/` on the same reasoning one level up (see realDir). Nothing legitimate
+// makes an arm flag a link.
+//
+// A refused entry is left on disk, never unlinked. unlinkSync on a symlink would only
+// remove the link, so deleting would be safe — but this hook does not delete what it
+// declines to read, and a well-formed planted FILE was never swept either. The skip is
+// reported (see the banner) rather than silent, because a silent non-restore on a
+// setup that works is the failure this project keeps finding, and someone whose
+// dotfile manager symlinks individual files would otherwise get nothing and no reason.
+function realFile(p) {
+  try { return lstatSync(p).isFile(); } catch { return false; }
+}
+function scanArms() {
+  const arms = [], odd = [];
+  if (!stateDirUsable()) return { arms, odd };
+  const consider = (p) => {
+    let st;
+    try { st = lstatSync(p); } catch { return; }   // absent: not a flag, not an anomaly
+    (st.isFile() ? arms : odd).push(p);
+  };
+  consider(legacyArmedPath);
+  if (!armDirUsable()) return { arms, odd };
   try {
     for (const name of readdirSync(armDir)) {
-      if (name.endsWith('.json') && !name.startsWith('.tmp.')) out.push(join(armDir, name));
+      if (name.endsWith('.json') && !name.startsWith('.tmp.')) consider(join(armDir, name));
     }
   } catch { /* armed.d may not exist yet */ }
-  return out;
+  return { arms, odd };
 }
+function armPaths() { return scanArms().arms; }
 
 function readArm(p) {
   try {
@@ -244,10 +277,20 @@ function isLive(arm, now) {
 // the same millisecond) fall through to the path comparison at the call site, which
 // is deterministic and reads nothing from the flag either.
 //
-// Scope, stated because it is narrower than the code looks: this is a POSIX property.
-// Windows has no ctime in that sense — libuv reports NTFS's ChangeTime, which the
-// native API can set — so on Windows this is ordering by write time, not a guarantee
-// about it. Untested there; the suite asserts behaviour, not unforgeability.
+// This is only sound because scanArms() has already refused anything that is not a
+// regular file. statSync FOLLOWS a symlink, so on a linked entry it would report the
+// TARGET's ctime and the whole guarantee evaporates — an attacker stages a file, never
+// touches it again, and links it in whenever they like. Reproduced against an earlier
+// version of this function that had the refusal missing. The two belong together.
+//
+// Scope, stated because it is narrower than the code looks. "Cannot be forged" means
+// "not by any call that operates on the file"; it is not absolute. Whoever serves the
+// filesystem under armed.d/ (a FUSE mount) or sets the system clock can state any
+// ctime they like — both strictly stronger primitives than writing an arm flag, and so
+// inside the same threat-model bound as the rest of this file. And it is a POSIX
+// property: Windows has no ctime in that sense — libuv reports NTFS's ChangeTime,
+// which the native API CAN set — so there this orders by write time without
+// guaranteeing it. Untested on that platform.
 function armOrder(p) {
   try {
     const t = statSync(p).ctimeMs;
@@ -631,15 +674,20 @@ try { sweep(now); } catch { /* a sweep failure must never break session start */
 
 if (payload.source !== 'clear') noop();   // non-clear, or no evidence of one
 
-// Candidate arms: live, and armed in this project.
+// Candidate arms: live, and armed in this project. `odd` is every armed.d entry
+// scanArms() would not treat as a flag at all — never read, never ordered, only
+// reported (see warnings()). Both accumulators are declared here so the early exits
+// below can report through the same channel as the successful path.
+const { arms: armFiles, odd: oddArms } = scanArms();
+const refused = [];
 const candidates = [];
-for (const p of armPaths()) {
+for (const p of armFiles) {
   const arm = readArm(p);
   if (!isLive(arm, now)) continue;
   if (!scopeAllows(arm.cwd, payload.cwd)) continue;        // wrong project -> leave armed
   candidates.push({ path: p, arm, order: armOrder(p) });
 }
-if (!candidates.length) noop();
+if (!candidates.length) { warn(); noop(); }
 
 // Oldest first, by the inode's change time rather than the flag's own `armed_at` —
 // see armOrder(). When two sessions in one project clear in the order they armed,
@@ -654,7 +702,6 @@ candidates.sort((x, y) =>
   (x.order === y.order ? 0 : x.order < y.order ? -1 : 1) || x.path.localeCompare(y.path));
 
 let chosen = null;
-const refused = [];
 for (const c of candidates) {
   const cp = winPath(c.arm.checkpoint);
   let body = '';
@@ -677,7 +724,7 @@ for (const c of candidates) {
     continue;
   }
   try { if (real) body = readFileSync(real, 'utf8'); } catch { /* ignore */ }
-  if (body.trim()) { chosen = { path: c.path, arm: c.arm, cp, body }; break; }
+  if (body.trim()) { chosen = { path: c.path, arm: c.arm, cp, body, order: c.order }; break; }
   drop(c.path);            // checkpoint gone: the flag is dead. The file is not.
 }
 
@@ -692,10 +739,39 @@ function refusalNote() {
     `checkpoint directories (${safePath(refused[0])}${n > 1 ? ', …' : ''}). ` +
     `Set CONTEXT_CYCLE_CHECKPOINT_ROOTS if that location is legitimate; the arm was kept.`;
 }
-if (!chosen) {
-  if (refused.length) writeSync(1, JSON.stringify({ systemMessage: '⚠ ' + refusalNote() }));
-  noop();
+
+// The same argument, one level earlier: scanArms() declined to even open these, so
+// nothing downstream can report them. Left silent, the whole symlink refusal would be
+// invisible in both directions — an attacker learns nothing either way, and a user
+// whose setup genuinely produced a link gets no restore and no reason, which is the
+// failure mode this project keeps rediscovering. Says what it is rather than accusing:
+// the honest reading is "something put a link here", not "you are under attack".
+//
+// Noise is bounded but real. armed.d is global, so a stray entry is reported on every
+// /clear in every project until it is removed — deliberately, since the hook cannot
+// read the entry to find out whose project it belongs to, and cannot delete it either
+// (see scanArms). The note names the path and the fix.
+function linkNote() {
+  const n = oddArms.length;
+  return `${n} armed.d entr${n === 1 ? 'y was' : 'ies were'} ignored: not a regular ` +
+    `file (${safePath(oddArms[0])}${n > 1 ? ', …' : ''}). /context-cycle writes arm ` +
+    `flags as plain files, so a symlink or directory there was written by something ` +
+    `else and is not read. Remove it; re-run /context-cycle if you expected a restore.`;
 }
+
+function warnings() {
+  const w = [];
+  if (oddArms.length) w.push(linkNote());
+  if (refused.length) w.push(refusalNote());
+  return w;
+}
+// Emit the warnings on a path that injects nothing. Safe before noop(): writeSync is
+// synchronous, and a systemMessage with no hookSpecificOutput restores nothing.
+function warn() {
+  const w = warnings();
+  if (w.length) writeSync(1, JSON.stringify({ systemMessage: w.map((s) => '⚠ ' + s).join('\n') }));
+}
+if (!chosen) { warn(); noop(); }
 
 // Passed every gate: this is the restore. Consume this one arm, then inject.
 drop(chosen.path);
@@ -741,7 +817,32 @@ if (armedBranch) confirmLine += title ? ` (${armedBranch})` : ` (branch: ${armed
 // which is the common case, reads exactly as it did before. STALE_AFTER is a
 // readability threshold, not a safety one — nothing changes behaviour at 4h.
 const STALE_AFTER = 4 * 3600;
-const ageSeconds = now - chosen.arm.armed_at;
+
+// Age is the OLDER of what the flag says about itself and when the flag was actually
+// written. Two independent reasons, and they point the same way:
+//
+// - `armed_at` is written by whoever wrote the flag, so on its own it can under-report
+//   — a flag stamped `now` reads as fresh however long it has sat there, and this
+//   disclosure is the only thing telling the model to re-check a stale plan. Since
+//   ordering moved to the inode's change time (armOrder), the two were decoupled:
+//   the hook was sorting on one clock and reporting on another. This re-couples them.
+// - It also fixes an honest case with no attacker in it. A flag whose `armed_at` is
+//   wrong because the machine's clock was wrong when it was written — suspend/resume,
+//   a restored VM snapshot, a box that boots before NTP — still gets its real age.
+//
+// Taking the max rather than replacing the field: over-reporting age is harmless (it
+// asks for a re-check that was not strictly needed), under-reporting is the failure.
+// Neither clock is trusted over the other; the more cautious one wins. `order` is
+// Infinity when the stat failed, which is not an age — fall back to the flag's own.
+//
+// Only one direction of this is pinned by a test, and the gap is in TODOS.md: group 8
+// covers an old `armed_at` on a freshly written flag (the max must not drop it). The
+// converse — an old inode carrying a fresh `armed_at` — needs a flag genuinely older
+// than STALE_AFTER, and ctime cannot be moved backwards, so the suite would have to
+// wait four hours or move the system clock.
+const armedAge = now - chosen.arm.armed_at;
+const writtenAge = Number.isFinite(chosen.order) ? now - Math.floor(chosen.order / 1000) : armedAge;
+const ageSeconds = Math.max(armedAge, writtenAge);
 const ageLabel = humanAge(ageSeconds);
 const isOld = ageSeconds >= STALE_AFTER && !!ageLabel;
 const nowBranchRaw = clamp(currentBranch(payload.cwd), 60);
@@ -754,8 +855,10 @@ if (drifted) confirmLine += ` · now on ${nowBranch}`;
 // A restore that succeeded on a later candidate still has to report the ones it
 // walked past. Otherwise a planted flag that sorts first is refused invisibly — the
 // user sees an ordinary green banner and never learns something on their disk is
-// pointing the restore at a file it has no business reading.
-if (refused.length) confirmLine += `\n⚠ ${refusalNote()}`;
+// pointing the restore at a file it has no business reading. Same for an armed.d
+// entry that was never a flag: a successful restore is exactly when it would go
+// unnoticed.
+for (const w of warnings()) confirmLine += `\n⚠ ${w}`;
 
 const header =
   '## Restored working context (/context-cycle)\n' +

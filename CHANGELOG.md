@@ -109,11 +109,37 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   manual page. `armed_at` is now ignored for ordering rather than clamped, so a forgery
   cannot push itself later either, and nothing in the comparator reads a field the flag
   supplied. Eight assertions in a new group 23, three of which fail against the hook as
-  it stood. **Two limits, asserted rather than described.** This orders by *when* a
+  it stood. **The ordering alone was not enough, and the first version of this change
+  shipped with the hole open.** `statSync` and `readFileSync` both *follow* a symlink
+  and report the target, so a symlinked entry in `armed.d/` grafts a fresh directory
+  entry onto an inode the attacker last touched whenever they liked — no race, no
+  backdating, and the sort read the staged file's untouched ctime. Reproduced against
+  the ordering fix itself: a flag staged outside `armed.d/`, then linked in two seconds
+  *after* a legitimate arm, still sorted first and restored the planted checkpoint. An
+  entry that is not a regular file is now refused before anything reads it, checked
+  with `lstat` at the one place both the sweep and the candidate scan go through.
+  Refused rather than ordered by the link's own ctime: nothing legitimate makes an arm
+  flag a link, and this file already refuses a symlinked `context-cycle/` or `armed.d/`
+  one level up. A refused entry is left on disk — the hook does not delete what it
+  declines to read — and is **reported in the banner**, because a silent non-restore on
+  a setup that works is the failure this project keeps finding. A hardlink is *not*
+  refused and does not need to be: it is a regular file, and `link()` is a metadata
+  write that moves the inode's ctime forward, which group 24 asserts rather than
+  assumes. Six assertions in a new group 24, five of which fail against the
+  ordering-only hook.
+  The staleness disclosure was re-coupled to the same clock in the same pass: it read
+  `armed_at` while ordering read ctime, so a flag stamped `now` read as fresh however
+  long it had sat there. Age is now the *older* of the two, which also fixes an honest
+  case — a flag written while the machine's clock was wrong now reports its real age.
+  **Two limits, asserted rather than described.** This orders by *when* a
   flag was written and does not authenticate *who* wrote it, so a flag planted before a
   real arm genuinely is older and still sorts first. And ordering is not a defence on
   its own: losing the sort costs an attacker one cycle, because the flag stays on disk
-  and is a candidate again at the next `/clear`. **And a scope note:** ctime is a POSIX
+  and is a candidate again at the next `/clear`. **And a scope note:** "cannot be
+  forged" means "not by any call that operates on the file" — whoever serves the
+  filesystem under `armed.d/` or sets the system clock can still state any ctime, both
+  strictly stronger primitives than writing an arm flag and so inside the same threat
+  bound. ctime is also a POSIX
   property; Windows has no equivalent — libuv reports NTFS's ChangeTime, which the
   native API can set — so there this is ordering by write time rather than a guarantee
   about it, and it is untested on that platform. The other half of the arm-flag trust

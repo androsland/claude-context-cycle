@@ -86,6 +86,14 @@ count() { wc -l | tr -d ' '; }
 CAN_SYMLINK=0
 ln -s "$ROOT" "$ROOT/.symprobe" 2>/dev/null && [ -L "$ROOT/.symprobe" ] && CAN_SYMLINK=1
 rm -f "$ROOT/.symprobe" 2>/dev/null
+# Hardlinks are a separate capability from symlinks and fail for different reasons —
+# FAT32, some container overlay mounts, and a Git Bash without the NTFS privilege.
+# Group 24 needs one to prove the ctime ordering survives a link(), which is the
+# reason a hardlink is NOT refused where a symlink is.
+CAN_HARDLINK=0
+: > "$ROOT/.hardsrc" 2>/dev/null
+ln "$ROOT/.hardsrc" "$ROOT/.hardprobe" 2>/dev/null && [ -f "$ROOT/.hardprobe" ] && CAN_HARDLINK=1
+rm -f "$ROOT/.hardsrc" "$ROOT/.hardprobe" 2>/dev/null
 CAN_ODD_NAMES=0
 ODDPROBE="$ROOT/$(printf 'o\vd"d')"
 : > "$ODDPROBE" 2>/dev/null && [ -f "$ODDPROBE" ] && CAN_ODD_NAMES=1
@@ -158,6 +166,13 @@ refused_in() {
     *) echo "$b" ;;
   esac
 }
+# Group 24's banner carries a restore receipt AND a warning in one systemMessage, so
+# the exact-match style used everywhere else would conflate the two. Split them:
+# restored_line() is the receipt or '' when nothing was restored (a warning-only banner
+# must never read as a restore), odd_note() is whether the not-a-regular-file warning
+# was there at all — the point being that a refusal is reported rather than silent.
+restored_line() { case "$1" in '✓ Restored'*) printf '%s\n' "$1" | head -1 ;; *) echo "" ;; esac; }
+odd_note() { case "$1" in *"not a regular file"*) echo "warned" ;; *) echo "silent" ;; esac; }
 mkcp() { printf '## Working on: %s\n\n### Remaining Work\n1. finish %s\n' "$2" "$2" > "$1"; }
 mkproj() { mkdir -p "$1"; git -C "$1" init -q -b testbr 2>/dev/null; git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null; }
 # Count arm flags by glob rather than `ls | grep -c` (SC2010): the glob asks the shell
@@ -1159,6 +1174,64 @@ eq "two real arms: first clear gets the older" \
 eq "two real arms: second clear gets the newer" \
    '✓ Restored: "LEGIT2" · next: finish LEGIT2 (testbr)' "$(clear_in "$P23")"
 rm -f "$ARMD"/*.json
+
+echo "=== 24. An armed.d entry that is not a regular file is never read ==="
+# The bypass group 23's ordering had on its own. Both readFileSync (content) and
+# statSync (the sort key) FOLLOW a symlink and report the TARGET, so a link grafts a
+# fresh directory entry onto an inode the attacker last touched whenever they liked —
+# no race, no backdating, and the ctime sort reads the staged file's untouched time.
+# Reproduced against the version of the hook that had the ctime sort but not the
+# refusal: a flag staged outside armed.d, then linked in two seconds AFTER a legitimate
+# arm, still sorted first and restored the planted checkpoint.
+rm -f "$ARMD"/*.json
+# plant_file <path> <checkpoint> — a well-formed flag for P23, written somewhere the
+# hook does not look. Its ctime is set here and never moves again.
+plant_file() { cat > "$1" <<EOF
+{ "checkpoint": "$(winp "$2")", "branch": "testbr", "cwd": "$(winp "$P23")", "armed_at": $(date +%s) }
+EOF
+}
+if [ "$CAN_SYMLINK" -eq 1 ]; then
+  S24="$ROOT/staged-24.json"; plant_file "$S24" "$C23P"
+  sleep 1
+  arm23 s24a "$C23L"
+  sleep 1
+  ln -s "$S24" "$ARMD/zz-linked.json"
+  B24="$(clear_in "$P23")"
+  eq "a symlinked entry does not win the sort" \
+     '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$B24")"
+  eq "and the skip is reported, not silent" "warned" "$(odd_note "$B24")"
+  # Losing one sort is not the property being claimed — a symlink must be inert, not
+  # merely later. The next clear has no legitimate arm left for it to lose to.
+  eq "the link is still on disk (the hook does not delete what it won't read)" \
+     "present" "$([ -L "$ARMD/zz-linked.json" ] && echo present || echo absent)"
+  B24B="$(clear_in "$P23")"
+  eq "with nothing to lose to, it still restores nothing" "" "$(restored_line "$B24B")"
+  eq "and says so again rather than clearing into silence" "warned" "$(odd_note "$B24B")"
+  rm -f "$ARMD"/*.json "$S24"
+else
+  skip "24 (symlinked armed.d entry)" "this filesystem cannot create symlinks"
+fi
+
+# A hardlink is deliberately NOT refused, and that is a claim needing evidence rather
+# than reasoning: it is a regular file, so scanArms() admits it, and the ordering
+# guarantee has to survive on its own. link() is a metadata write and moves the target
+# inode's ctime FORWARD, so a hardlink planted after a real arm sorts after it. If that
+# were ever false, this group goes red instead of the refusal quietly under-covering.
+if [ "$CAN_HARDLINK" -eq 1 ]; then
+  H24="$ROOT/staged-24-hard.json"; plant_file "$H24" "$C23P"
+  sleep 1
+  arm23 s24b "$C23L"
+  sleep 1
+  if ln "$H24" "$ARMD/zz-hard.json" 2>/dev/null; then
+    eq "a hardlinked flag is accepted but link() moved its ctime forward" \
+       '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$(clear_in "$P23")")"
+  else
+    skip "24 (hardlinked armed.d entry)" "ln refused to link into the state dir"
+  fi
+  rm -f "$ARMD"/*.json "$H24"
+else
+  skip "24 (hardlinked armed.d entry)" "this filesystem cannot create hardlinks"
+fi
 
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"

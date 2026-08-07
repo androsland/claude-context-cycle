@@ -22,6 +22,16 @@
   but a `uname` branch built on the same assumption would have skipped a group that
   works, silently. Worth remembering when the temptation is to hard-code a platform
   rather than ask it. (CI work, 2026-08-05; 14b claim corrected 2026-08-06)
+- **Half of the staleness reconciliation is untestable in the suite.** The restore
+  banner now reports the *older* of the flag's own `armed_at` and the inode's change
+  time, so a flag stamped `now` can no longer read as fresh however long it has sat on
+  disk. Group 8 pins one direction — an old `armed_at` on a freshly written flag must
+  still report old, i.e. the `max()` must not have quietly replaced the field. The
+  converse needs a flag whose *inode* is older than `STALE_AFTER` (4h), and ctime
+  cannot be moved backwards by construction: the suite would have to wait four hours
+  or move the system clock, neither of which belongs in a unit run. Reproducing it by
+  hand costs a `sleep`, which is what it will take if that path ever regresses.
+  (security review follow-up, 2026-08-07)
 - **The `/a/notes.md` path-rewrite case is not reachable from CI.** The fix stops
   `arm.sh` mangling a checkpoint under a single-letter top-level directory into a
   Windows drive path, but asserting it needs a directory at the filesystem root,
@@ -113,7 +123,24 @@
   five are positive controls plus a deliberate limit-pin — the assertion that a flag
   planted BEFORE a real arm still wins, because this orders by write time and does not
   authenticate the writer.
-  **Scope of that, narrower than the code looks:** ctime is a POSIX property. Windows
+  **The ordering alone did not hold, and the first version of this fix shipped with the
+  hole open.** `statSync` and `readFileSync` both follow a symlink and report the
+  target, so a symlinked entry in `armed.d/` grafts a fresh directory entry onto an
+  inode the attacker last touched whenever they liked — the sort read the staged file's
+  untouched ctime. Reproduced against the ordering fix: a flag staged outside
+  `armed.d/`, then linked in two seconds *after* a legitimate arm, still sorted first
+  and restored. An entry that is not a regular file is now refused with `lstat` at the
+  single choke point the sweep and the candidate scan share, left on disk rather than
+  deleted, and reported in the banner rather than skipped in silence. A hardlink is not
+  refused and does not need to be — it is a regular file and `link()` moves the inode's
+  ctime forward — which group 24 asserts rather than assumes. Six assertions in group
+  24, five of which fail against the ordering-only hook. Found by the security reviewer
+  on this branch's own diff and reproduced independently before acting on it.
+  **Scope of that, narrower than the code looks:** "cannot be forged" means "not by any
+  call that operates on the file", not absolutely — whoever serves the filesystem under
+  `armed.d/` (a FUSE mount) or sets the system clock can state any ctime, both strictly
+  stronger primitives than writing an arm flag and so inside this entry's own threat
+  bound. ctime is also a POSIX property. Windows
   has no equivalent — libuv reports NTFS's ChangeTime, which the native API *can* set
   — so there this is ordering by write time rather than a guarantee about it, and it is
   untested on that platform. Ordering is also not a defence standing alone: losing the

@@ -169,9 +169,14 @@ which is still open in `TODOS.md` — along with why it is unlikely to arrive.
 What a planted flag *cannot* do any more is jump the queue. When two arms match one
 project the hook takes the oldest, and "oldest" is now the inode's change time rather
 than the `armed_at` the flag writes about itself, so a forgery cannot claim to predate
-a real arm. It still fires if there is no real arm to lose to, and a flag planted
-*before* one genuinely is older — this orders by when a flag was written, not by who
-wrote it.
+a real arm. That holds only because an `armed.d` entry that is not a regular file is
+refused outright — a symlink there would report its *target's* change time, which is
+whenever the attacker last touched a file they staged elsewhere. A stray entry is
+reported in the banner rather than skipped in silence.
+
+Two limits on that, both pinned by tests rather than described: it still fires if
+there is no real arm to lose to, and a flag planted *before* one genuinely is older.
+This orders by when a flag was written, not by who wrote it.
 
 ### Where checkpoints live
 
@@ -211,15 +216,18 @@ checkpoints are kept — delete them yourself if you want them gone.
 bash test/run-tests.sh
 ```
 
-128 assertions across 25 groups, on a machine and a path where every capability probe
+185 assertions across 30 groups, on a machine and a path where every capability probe
 passes —
-fewer where the filesystem can't do symlinks or odd filenames, and the run reports each
+fewer where the filesystem can't do symlinks, hardlinks or odd filenames, and the run
+reports each
 group it skipped by name. Covers concurrent arms, project scoping, arm lifetime and
 staleness disclosure, litter collection,
 untrusted branch names reaching the model context,
 `arm.sh` argument validation, fail-closed payload handling, legacy-flag migration,
 full multi-KB payload delivery, a hostile state dir (symlinked `armed.d` or its
-parent, a symlink pre-placed on the flag path, control characters in paths), and a
+parent, a symlink pre-placed on the flag path, a symlinked or hardlinked arm flag,
+control characters in paths), checkpoint confinement, arm ordering under a backdated
+or future-stamped forgery, and a
 symlinked config root, which must keep working. It runs the repo's own `arm.sh` and hook against
 a throwaway `CLAUDE_CONFIG_DIR` in a temp dir, so it never reads or writes your real
 `~/.claude` and never touches an installed copy. Needs bash, node, and git — nothing
