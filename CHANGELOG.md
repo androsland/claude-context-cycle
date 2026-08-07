@@ -49,10 +49,53 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   cost worth naming: a machine whose clock is still at the epoch when you arm (dead
   RTC, no NTP yet) writes an honest flag that this discards, and the sweep then
   deletes it rather than skipping it. The checkpoint file survives; the pending
-  restore does not. Ten new assertions, each checked to fail against the previous hook. **Still open**, and
-  recorded in `TODOS.md`: `checkpoint` is read verbatim from any absolute path, and a
-  forged flag carrying a *plausible* older timestamp still sorts first — neither is
-  reachable by a shape check, both need the provenance check.
+  restore does not. Ten new assertions, each checked to fail against the previous hook.
+  The third field, `checkpoint`, is closed by the entry below. **Still open**, and
+  recorded in `TODOS.md`: a forged flag carrying a *plausible* older timestamp still
+  sorts first — not reachable by a shape check, and needing the provenance check.
+- **A restore no longer reads whatever file the arm flag names.** `checkpoint` was
+  taken verbatim from any absolute path and its contents injected as model context
+  under the hook's own "resume from this, don't repeat it" framing — an
+  arbitrary-file-**read** primitive for anything that could write into
+  `~/.claude/context-cycle/armed.d/`. The hook now accepts a checkpoint only under
+  `~/.claude/context-cycle/checkpoints`, under gstack's `<state-root>/projects` — the
+  two places the skill actually writes — or under anything listed in
+  `CONTEXT_CYCLE_CHECKPOINT_ROOTS` (`PATH`-style: `:` on Unix, `;` on Windows). Both
+  sides are resolved before comparing, so a symlinked `~/.claude` (stow, chezmoi)
+  matches and a symlink *inside* a root that points out of it does not; the boundary
+  is `=== root || startsWith(root + '/')`, so a sibling named `<root>-evil` is out.
+  The file is then read from the **resolved** path rather than the string the flag
+  gave, so a link that passed the check cannot be re-pointed at `~/.ssh/id_rsa` before
+  the read. That does not make the read atomic, and the residue is not all one thing:
+  swapping the *file* at the resolved path only yields attacker-authored content
+  inside a root, which is the injection case already accepted above — but swapping a
+  *directory component* of it in the same window can still escape every root, which is
+  this same arbitrary read behind a race rather than in the open. Both need write
+  access to a checkpoint root. Open, with the `O_NOFOLLOW`/`fstat` shape that closes
+  it, in `TODOS.md`; there is no deterministic test for either.
+  **A refusal keeps the arm.** It is announced on its own and, when a later arm does
+  restore, appended to that banner — so a mis-derived root costs one env var and a
+  second `/clear`, never the checkpoint. That is the whole reason this could ship on by
+  default: the project had already rejected a silent non-restore on a working setup,
+  and this converts it into a visible, reversible one. gstack's root is **derived**,
+  not asked for: its `GSTACK_HOME` → `CLAUDE_PLUGIN_DATA` (only when `CLAUDE_PLUGIN_ROOT`
+  names gstack) → `~/.gstack` chain is pure environment logic, so it is reimplemented in
+  six lines rather than executing `gstack-paths`, which the hook declines to do on the
+  restore path for the same reason it reads `.git/HEAD` instead of running `git`.
+  gstack's relative `.gstack` fallback is deliberately dropped — a hook's cwd is not a
+  trust anchor. Existence is checked before policy, so a checkpoint that is simply gone
+  still falls through to the sweep instead of becoming a permanent refusal. Twenty
+  assertions in a new group 22; the rest of the suite moved onto the real checkpoints
+  directory to test the policy rather than an exemption, closing a fidelity gap that
+  predates it — nothing had ever armed from a path the skill would produce. Against the
+  hook as it stood, twelve of the twenty fail because it restored what it should have
+  refused and three more because the arm did not survive to be recovered; three pass
+  there vacuously (they assert an arm count or an absent injection, which a hook that
+  already consumed the flag satisfies for the wrong reason) and two are positive
+  controls that must pass on both. **What this does not close, and must not be read as
+  closing:** prompt injection. `armed.d/` and `checkpoints/` are siblings, so whoever
+  can plant the flag can almost always plant the file it points at. This narrows what
+  can be injected, not whether — that still needs the provenance check in `TODOS.md`.
 - **`./install.sh` actually runs now.** Both `install.sh` and `uninstall.sh` shipped
   tracked as `100644`, so the README's own clone path — `./install.sh` — failed with
   `Permission denied` on the very first step. The `curl | bash` route pipes into an

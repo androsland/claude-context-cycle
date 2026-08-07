@@ -133,6 +133,16 @@ where `/context-restore` and `/context-save list` can find them too.
   no link back to the pre-clear session, so `source: "clear"` is the only evidence a
   clear actually happened. A missing or unparseable payload restores **nothing** —
   firing blind would burn an arm and inject a checkpoint nobody asked for.
+- **Restores only from the checkpoint directories.** An arm flag names the file to
+  inject, and the hook used to read whatever absolute path it found there. It now
+  restores only from `~/.claude/context-cycle/checkpoints/`, gstack's
+  `<state-root>/projects/` when gstack is installed, and anything you list in
+  `CONTEXT_CYCLE_CHECKPOINT_ROOTS` (a `PATH`-style list, `:`-separated on Unix, `;` on
+  Windows). Both sides are resolved before comparing, so a symlinked `~/.claude` —
+  stow, chezmoi — matches, while a symlink *inside* a root pointing out of it does not.
+  A checkpoint somewhere else is refused **loudly and without dropping the arm**: you
+  get a line saying which path was refused, and setting the variable and clearing again
+  restores it. See "What this does not stop" below for the boundary.
 
 ### Known limitation
 
@@ -143,6 +153,17 @@ identifies which session is clearing, so the hook cannot do better. This is why 
 clear-time banner names the checkpoint it restored (`✓ Restored: "…"`): a mis-pair is
 visible immediately rather than silent. Re-run `/context-cycle` if the banner isn't
 the checkpoint you expected. Sessions in *different* projects are never affected.
+
+### What the checkpoint confinement does not stop
+
+It closes an arbitrary-file-**read**: an arm flag can no longer point the hook at
+`~/.ssh/id_rsa` or a colleague's notes and have the contents injected as model
+context. It does **not** close prompt injection. Whoever can write an arm flag into
+`~/.claude/context-cycle/armed.d/` can, in almost every realistic case, also write a
+file into `~/.claude/context-cycle/checkpoints/` and point the flag at that — the two
+directories sit side by side. The confinement narrows *what* can be injected, not
+*whether*. Nor does it verify who wrote the arm; that would need a provenance check,
+which is still open in `TODOS.md`.
 
 ### Where checkpoints live
 

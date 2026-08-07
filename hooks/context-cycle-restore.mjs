@@ -27,7 +27,7 @@
 
 import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync, unlinkSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter, isAbsolute, normalize } from 'node:path';
 
 // An arm does not expire by age. It lives until it is consumed, or until the
 // checkpoint it points at is gone. Closing the editor on Friday and clearing on
@@ -464,6 +464,117 @@ function winPath(cp) {
   return m ? m[1].toUpperCase() + ':/' + m[2] : cp;
 }
 
+// --- Where a checkpoint is allowed to live ----------------------------------
+//
+// `checkpoint` used to be read verbatim from any absolute path the flag named. That
+// made an arm flag an arbitrary-file-READ primitive: whoever could write
+// armed.d/*.json could have any file the user can read injected into model context
+// under this hook's own "resume from this" framing. ~/.ssh/id_rsa, a .env, a private
+// repo's notes — none of them look like a checkpoint, and nothing checked.
+//
+// What this closes, precisely: the read is now confined to directories checkpoints
+// are actually written to. What it does NOT close, and this is the larger half — an
+// attacker who can write the arm flag can usually also write INTO those directories,
+// and a file they put there is read exactly as before. So this removes the
+// arbitrary-read, not the injection. The injection needs the provenance check
+// TODOS.md tracks, and no path test can substitute for it.
+//
+// Two roots, because /context-cycle writes to two places (SKILL.md step 1):
+//   $CLAUDE_CONFIG_DIR/context-cycle/checkpoints/$SLUG   (standalone)
+//   $GSTACK_STATE_ROOT/projects/$SLUG/checkpoints        (gstack installed)
+// Confining to the first alone would silently break every gstack user, and this
+// project has already decided once that a silent non-restore on a working setup is
+// the worst available outcome.
+//
+// The second root is derived, never executed. gstack ships bin/gstack-paths, and
+// SKILL.md gets the value by eval'ing it — fine for a skill's bash block, not for a
+// hook: shelling out to another tool on every session start is the thing the
+// `currentBranch()` note above refuses to do, and it would put a third party's
+// executable on the restore path. gstack's own chain for GSTACK_STATE_ROOT is pure
+// env-var logic with no filesystem lookup, so it can simply be read off and
+// reimplemented (read from bin/gstack-paths, gstack as installed 2026-08-07):
+//   GSTACK_HOME -> CLAUDE_PLUGIN_DATA (only when CLAUDE_PLUGIN_ROOT matches gstack)
+//                                     -> $HOME/.gstack -> .gstack
+// The last fallback is deliberately dropped. It is relative, and a hook's cwd is
+// whatever directory the session started in — anchoring a trust root there would
+// make the allowed set depend on where you happened to be standing.
+//
+// Copying a third party's logic is a coupling, and it is the one real fragility
+// here: if gstack changes that chain, this stops recognizing a legitimate
+// checkpoint. That is why the refusal is loud, keeps the arm, and names an env var
+// (below) — a wrong root costs a message and a re-clear, not a lost checkpoint.
+function gstackStateRoot() {
+  const home = (process.env.GSTACK_HOME || '').trim();
+  if (home) return home;
+  const data = (process.env.CLAUDE_PLUGIN_DATA || '').trim();
+  if (data && /gstack/i.test(process.env.CLAUDE_PLUGIN_ROOT || '')) return data;
+  const h = homedir();
+  return h ? join(h, '.gstack') : '';
+}
+
+// CONTEXT_CYCLE_CHECKPOINT_ROOTS: PATH-separated extra roots, for anyone whose
+// checkpoints legitimately live somewhere neither branch above can derive. It is an
+// escape hatch, not a weakening: an attacker who can set env vars for the Claude Code
+// process already has a strictly stronger primitive than writing an arm flag, which
+// is the same bound the rest of this file's threat model runs on.
+//
+// Roots are canonicalized, and so is the candidate, so a symlinked ~/.claude
+// (stow/chezmoi — group 16) and a symlinked checkpoints directory both still match,
+// while a symlink INSIDE a root that points out of it does not.
+function checkpointRoots() {
+  const raw = [join(claudeDir, 'context-cycle', 'checkpoints')];
+  const g = gstackStateRoot();
+  if (g) raw.push(join(g, 'projects'));
+  for (const extra of String(process.env.CONTEXT_CYCLE_CHECKPOINT_ROOTS || '').split(delimiter)) {
+    const t = extra.trim();
+    if (t) raw.push(t);
+  }
+  const out = [];
+  for (const r of raw) {
+    const n = norm(canon(r));
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+const CHECKPOINT_ROOTS = checkpointRoots();
+
+// Relative paths are refused rather than resolved: the base would be the session's
+// cwd, which is not a trust anchor. `..` is handled by canon() collapsing it — and
+// where the path does not exist canon() falls back to the raw string, so normalize()
+// runs too, otherwise `<root>/../../etc/passwd` would pass a prefix test on its own
+// spelling. Membership is `=== root` or `startsWith(root + '/')`, never a bare
+// startsWith: `<root>-evil/x` is not inside `<root>`.
+//
+// Returns the RESOLVED path to read, not a boolean, and the caller reads from that
+// rather than from the string it passed in. Re-resolving the original at read time
+// would leave a symlink-swap window: a link inside a root pointing at another
+// in-root file passes here, and pointing it at ~/.ssh/id_rsa before the read gives
+// back exactly the arbitrary read this function exists to stop. Reading the resolved
+// path shrinks the residue to replacing the file that path already names — which is
+// writing your own content into a root, no race and nothing new. `norm()` is for
+// comparison only (it lowercases on Windows); the returned value is pre-norm.
+function allowedCheckpoint(cp) {
+  if (typeof cp !== 'string' || !cp) return '';
+  if (!isAbsolute(cp)) return '';
+  const real = canon(normalize(cp));
+  const c = norm(real);
+  if (!c) return '';
+  return CHECKPOINT_ROOTS.some((r) => c === r || c.startsWith(r + '/')) ? real : '';
+}
+
+// A refused path is shown back to the user so a wrong root is diagnosable, and it is
+// attacker-influenceable, so strip the control bytes that would let it move the
+// cursor or emit escape sequences in the terminal, plus the zero-width and bidi
+// overrides that would let it render as a path it is not. Display only — the
+// comparison above runs on the real string, and this never reaches model context,
+// which is why this strips a named set rather than using safeRef()'s allowlist: a
+// path the user has to recognise has to survive non-ASCII, and the markdown/prompt
+// injection safeRef() defends against needs a channel the model reads.
+function safePath(p) {
+  const strip = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g;
+  return clamp(String(p).replace(strip, '?'), 160);
+}
+
 // Read the hook payload (source + cwd).
 let payload = {};
 try {
@@ -492,14 +603,48 @@ if (!candidates.length) noop();
 candidates.sort((x, y) => x.arm.armed_at - y.arm.armed_at || x.path.localeCompare(y.path));
 
 let chosen = null;
+const refused = [];
 for (const c of candidates) {
   const cp = winPath(c.arm.checkpoint);
   let body = '';
-  try { if (cp && existsSync(cp)) body = readFileSync(cp, 'utf8'); } catch { /* ignore */ }
+  let here = false;
+  try { here = !!cp && existsSync(cp); } catch { /* ignore */ }
+  // Order matters. Root membership is only consulted for a checkpoint that is
+  // actually THERE: a flag naming a path that no longer exists is dead whatever the
+  // policy says, and letting it fall through to drop() keeps the disposal of dead
+  // flags exactly as it was rather than turning every stale one into a permanent
+  // resident that the sweep will not reap either.
+  const real = here ? allowedCheckpoint(cp) : '';
+  if (here && !real) {
+    // Refused, and deliberately NOT dropped. The likeliest cause of a wrong refusal
+    // is a checkpoint root this hook could not derive, and dropping would destroy a
+    // legitimate pending restore to punish a configuration mistake. Left armed, the
+    // fix is one env var and one more /clear; the checkpoint file is untouched
+    // either way. For a planted flag, leaving it costs nothing — it never fires, and
+    // an attacker who can write one can write another.
+    refused.push(cp);
+    continue;
+  }
+  try { if (real) body = readFileSync(real, 'utf8'); } catch { /* ignore */ }
   if (body.trim()) { chosen = { path: c.path, arm: c.arm, cp, body }; break; }
   drop(c.path);            // checkpoint gone: the flag is dead. The file is not.
 }
-if (!chosen) noop();
+
+// Refusing has to be LOUD. Every other way this hook declines to fire is a
+// non-event by design — wrong project, no arm, nothing pending — but this one means
+// a checkpoint the user asked for exists on disk and is being withheld, and /clear
+// has already taken their context window. Silence there is the exact failure this
+// project keeps finding: the clear looked normal and nothing came back.
+function refusalNote() {
+  const n = refused.length;
+  return `${n} arm${n === 1 ? '' : 's'} not restored: checkpoint outside the known ` +
+    `checkpoint directories (${safePath(refused[0])}${n > 1 ? ', …' : ''}). ` +
+    `Set CONTEXT_CYCLE_CHECKPOINT_ROOTS if that location is legitimate; the arm was kept.`;
+}
+if (!chosen) {
+  if (refused.length) writeSync(1, JSON.stringify({ systemMessage: '⚠ ' + refusalNote() }));
+  noop();
+}
 
 // Passed every gate: this is the restore. Consume this one arm, then inject.
 drop(chosen.path);
@@ -554,6 +699,12 @@ const drifted = !!armedBranchRaw && !!nowBranchRaw && armedBranchRaw !== nowBran
 
 if (isOld) confirmLine += ` · ${ageLabel} old`;
 if (drifted) confirmLine += ` · now on ${nowBranch}`;
+
+// A restore that succeeded on a later candidate still has to report the ones it
+// walked past. Otherwise a planted flag that sorts first is refused invisibly — the
+// user sees an ordinary green banner and never learns something on their disk is
+// pointing the restore at a file it has no business reading.
+if (refused.length) confirmLine += `\n⚠ ${refusalNote()}`;
 
 const header =
   '## Restored working context (/context-cycle)\n' +

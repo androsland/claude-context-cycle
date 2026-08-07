@@ -88,6 +88,62 @@
   `currentBranch()` in hooks/context-cycle-restore.mjs; cited by name rather than line,
   because the first version of this entry cited a range that its own commit shifted).
   (2026-08-06)
+  **Update: `checkpoint` is now constrained too; only the sort-order half is left.**
+  The design question above was resolved by *deriving* gstack's root instead of asking
+  for it — `GSTACK_HOME` → `CLAUDE_PLUGIN_DATA` (gated on `CLAUDE_PLUGIN_ROOT` naming
+  gstack) → `~/.gstack` is pure environment logic with no subprocess in it, so the hook
+  reimplements the chain rather than executing `gstack-paths`. `CONTEXT_CYCLE_CHECKPOINT_ROOTS`
+  covers anything neither root reaches, and a refusal is loud and keeps the arm, so the
+  escape hatch is reachable after the fact. Twenty assertions in group 22.
+  **What is left of this entry:** a forged flag with a *plausible* older `armed_at`
+  still sorts ahead of a legitimate concurrent arm, which no shape check can catch —
+  and the arbitrary-read fix does **not** close prompt injection, because `armed.d/`
+  and `checkpoints/` are siblings and whoever can write the flag can usually write the
+  file it names. Both still want the provenance check this entry is really about.
+  (2026-08-07)
+
+- **`arm.sh` does not check the checkpoint root at arm time.** The hook refuses an
+  out-of-root `checkpoint` on restore; `arm.sh` will still happily write the flag. So a
+  user (or a skill variant) pointing `/context-cycle` at an unusual location gets a
+  green arm and learns it was wrong only at the next `/clear`. Deliberate for now: the
+  refusal is recoverable and duplicating the root derivation into shell means two
+  implementations of the same policy drifting apart, which is a worse failure than a
+  late warning. Revisit if the roots ever stop being derivable in one place.
+  (checkpoint-confinement work, 2026-08-07)
+
+- **The checkpoint read is still a check-then-use, though a much narrower one.** The
+  hook reads the path `allowedCheckpoint()` *resolved*, not the string the flag gave
+  it, so the obvious version of this is closed: a symlink inside a root cannot pass the
+  check and then be re-pointed at `~/.ssh/id_rsa` before the read. What is left is
+  replacing something at that resolved path between the check and the read — the file
+  itself, which only yields attacker-authored content inside a root and so collapses
+  into the already-accepted injection case, or a *directory component* of it, which
+  could still escape. Both need write access to a checkpoint root, the same bound as
+  the `[ -L ]` check-then-use below. Closing the remainder means an `open()`-then-
+  `fstat()`-the-fd shape, or `O_NOFOLLOW` on each component. Note there is no
+  deterministic test for any of this, closed part included: it needs the swap to land
+  inside a window measured in microseconds. Group 22 asserts the observable half — a
+  legitimate in-root link still restores — and nothing more.
+  (checkpoint-confinement work, 2026-08-07; narrowed after security review the same day)
+
+- **`safePath()` strips a named set of characters rather than allowlisting.** The
+  refused path shown back to the user drops C0/C1 controls plus the zero-width and
+  bidi-override ranges, which covers terminal escape injection and the
+  render-as-a-path-it-is-not trick. It is not `safeRef()`'s allowlist, deliberately: a
+  path the user has to *recognise* has to survive non-ASCII, and this string never
+  reaches model context. The cost is that it is a blocklist, so a future Unicode
+  display trick outside those ranges gets through to the terminal. Bounded to
+  cosmetics — the message is already an anomaly banner. (security review, 2026-08-07)
+
+- **The gstack root derivation is a copy of another project's private detail.** The
+  hook reimplements `bin/gstack-paths`'s `GSTACK_STATE_ROOT` chain as read off gstack
+  as installed on 2026-08-07. If gstack changes that chain, checkpoints written by the
+  new gstack get refused, and nothing here will announce it — the failure surfaces as a
+  user reporting a refusal, and the fix is `CONTEXT_CYCLE_CHECKPOINT_ROOTS` until the
+  chain is updated. Accepted over the alternative (executing `gstack-paths` on the
+  restore path) rather than because it is safe. gstack's relative `.gstack` fallback is
+  intentionally not copied: a hook's cwd is not a trust anchor.
+  (checkpoint-confinement work, 2026-08-07)
 
 - **`arm.sh`'s symlink guard is a check-then-use, not an atomic one.** `[ -L ]` on
   `context-cycle/` and `armed.d/` runs at startup and again immediately before the

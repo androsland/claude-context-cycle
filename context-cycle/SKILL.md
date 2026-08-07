@@ -165,6 +165,17 @@ Now press  /clear  — your saved context auto-restores into the fresh session.
   cycle is reachable — or overwritable — by another session's.
 - **Checkpoints are append-only.** Each cycle writes a new file; nothing is
   overwritten or deleted. The hook deletes arm flags only, never a checkpoint.
+- **The restore only reads from checkpoint directories.** The hook accepts a
+  `checkpoint` path under `$CLAUDE_DIR/context-cycle/checkpoints`, under
+  `$GSTACK_STATE_ROOT/projects` — the two locations Step 1 above writes to — or under
+  anything in `CONTEXT_CYCLE_CHECKPOINT_ROOTS` (`PATH`-style, `:` on Unix, `;` on
+  Windows). Both sides are resolved first, so a symlinked config dir matches and a
+  symlink escaping a root does not. Anything else is refused with a visible line and
+  the arm is **kept**, not consumed — so a legitimate location that this misses costs
+  one env var and a second `/clear`, never a lost checkpoint. If you change where
+  Step 1 writes, change this too. The hook derives `GSTACK_STATE_ROOT` from the
+  environment rather than running `gstack-paths`, because it will not execute another
+  tool on the restore path.
 - If `arm.sh` fails, the restore is NOT armed — say so and don't prompt for `/clear`.
 
 ---
@@ -238,6 +249,24 @@ Scope statements, not caveats: an unstated limit reads as a claim of coverage.
   cloned therefore passes exactly as readily as a shortcut you made yourself, because
   the two are the same mechanism. Bounded by what it yields: the content injected is
   your own checkpoint, and the session's cwd physically *is* the armed project.
+- **Anything an attacker can write *inside* a checkpoint root.** Confining
+  `checkpoint` to the known roots closes an arbitrary-file-**read**: an arm flag can no
+  longer name `~/.ssh/id_rsa` and have it injected as model context. It does not close
+  prompt **injection**. `armed.d/` and `checkpoints/` are siblings under
+  `context-cycle/`, so whoever can plant an arm flag can almost always plant the file
+  it points at too, and that file is inside a root by construction. The check narrows
+  what can be injected, not whether — closing that needs a provenance check on the arm
+  itself, which is still open in `TODOS.md`. It also cannot see *content*: a file the
+  user wrote themselves and a file an attacker wrote sit in the same directory and look
+  identical to a path check.
+- **A checkpoint root that is neither of the two this repo knows.** The roots are
+  derived from the environment, and gstack's is derived by reimplementing its
+  `GSTACK_STATE_ROOT` chain rather than asking it — so a future gstack that changes
+  that chain, or any third integration that writes checkpoints somewhere else, gets
+  refused until someone sets `CONTEXT_CYCLE_CHECKPOINT_ROOTS`. That refusal is the
+  designed failure mode (loud, arm preserved, one variable to fix) rather than an
+  oversight, but it is a real coupling to another project's private detail and it will
+  not announce itself when that detail moves.
 - **A Claude Code version that stops sending `source` on SessionStart.** The hook
   requires `source === 'clear'` and fails closed, so the restore would stop firing
   entirely rather than fire on unrelated session starts. That is deliberate: the
