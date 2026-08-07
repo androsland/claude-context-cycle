@@ -178,16 +178,18 @@ function readArm(p) {
 // bound via CONTEXT_CYCLE_TTL — sits inside it. With no bound, age is not consulted
 // at all and only the shape is checked.
 //
-// armed_at stays REQUIRED even though nothing expires: it is what orders concurrent
-// arms at the sort further down, so a flag without it is malformed, not eternal.
-// A far-future stamp is no longer junk on its own — with no upper bound there is
-// nothing for it to be junk relative to, and clock skew across a suspend/resume or a
-// restored VM snapshot is an honest way to get one. It can only affect sort order.
+// armed_at stays REQUIRED even though nothing expires and it no longer orders
+// anything: every flag this tool has ever written carries it, so its absence marks a
+// flag this tool did not write, and the age disclosure at the bottom reads it. A
+// far-future stamp is no longer junk on its own — with no upper bound there is nothing
+// for it to be junk relative to, and clock skew across a suspend/resume or a restored
+// VM snapshot is an honest way to get one.
 //
-// It must also be POSITIVE. arm.sh stamps `date +%s`, and the sort below is
-// ascending — a planted flag stamped 0 would otherwise beat every legitimate arm in
-// its project on every /clear, deterministically, rather than having to win a race it
-// might lose.
+// It must also be POSITIVE, which is now purely a shape check: `date +%s` cannot
+// produce it, so a flag that carries it was hand-written. It used to be load-bearing
+// against a planted flag stamped 0 winning the ascending sort outright; ordering has
+// since moved off this field entirely (see armOrder), which closed that properly —
+// a forgery only had to say `1` to get past a check on the sign.
 //
 // Accepted cost, because this is not quite "no honest flag can look like that": a
 // machine whose clock is still at the epoch when the arm is written — dead RTC, no
@@ -198,18 +200,60 @@ function readArm(p) {
 // firing a planted one, which is the correct direction for a hook that injects into
 // model context.
 //
-// This closes one shape, not the class: a forged flag carrying a plausible older
-// timestamp still sorts first, and nothing here can tell it from a real one. Sort
-// position stays attacker-influenceable until the flag itself is provenance-checked
-// (TODOS.md, "an arm flag on disk is trusted wholesale"). Losing the sort costs an
-// attacker one cycle anyway — the flag stays on disk and is a candidate again at the
-// next /clear.
+// What is left of the flag's trust problem after this and armOrder() is the flag
+// itself: nothing here authenticates who wrote one (TODOS.md, "an arm flag on disk is
+// trusted wholesale").
 function isLive(arm, now) {
   if (!arm || typeof arm.armed_at !== 'number' || !Number.isFinite(arm.armed_at)) return false;
   if (arm.armed_at <= 0) return false;
   if (!ARM_TTL_SECONDS) return true;
   const age = now - arm.armed_at;
   return age <= ARM_TTL_SECONDS && age > -ARM_TTL_SECONDS;
+}
+
+// Sort key for concurrent arms — and the only piece of arm metadata that does NOT
+// come out of the flag's own JSON.
+//
+// The sort used to run on `armed_at`. That field is written by whoever wrote the
+// flag, so a planted one carrying a small timestamp sorted ahead of every legitimate
+// arm in its project and won every /clear, deterministically, instead of having to
+// win a race. Requiring `armed_at > 0` removed only the laziest spelling of that:
+// `1` works exactly as well as `0`.
+//
+// The inode's change time is not writable. There is no syscall that sets it — it is
+// updated as a side effect of every metadata write, so backdating mtime moves ctime
+// FORWARD, and so does the rename arm.sh writes through. Measured on this repo's
+// Linux target rather than read off a manual page: `touch -d 2020-01-01` and
+// `utimesSync(0)` each leave mtime in the past and ctime at the current time.
+//
+// So arms are ordered by when they were actually written, which is what the sort was
+// always trying to express — `armed_at` was standing in for it. A flag can no longer
+// claim to predate an arm that was written before it.
+//
+// Two things this does NOT do, both pinned by assertions in group 23 rather than left
+// to prose. It does not authenticate the writer: a flag planted BEFORE a legitimate
+// arm genuinely is older and still sorts first. And it is not a defence on its own —
+// losing the sort costs an attacker one cycle, since the flag stays on disk and is a
+// candidate again at the next /clear. Ordering is the half of the arm-flag trust
+// problem that a check can reach; the other half is in TODOS.md and no check here
+// closes it.
+//
+// Unreadable => Infinity, so it sorts LAST. Falling back to `armed_at` would hand the
+// hole back to anyone who could make the stat fail, and sorting last costs a
+// legitimate arm nothing permanent for the reason just given. Ties (both Infinity, or
+// the same millisecond) fall through to the path comparison at the call site, which
+// is deterministic and reads nothing from the flag either.
+//
+// Scope, stated because it is narrower than the code looks: this is a POSIX property.
+// Windows has no ctime in that sense — libuv reports NTFS's ChangeTime, which the
+// native API can set — so on Windows this is ordering by write time, not a guarantee
+// about it. Untested there; the suite asserts behaviour, not unforgeability.
+function armOrder(p) {
+  try {
+    const t = statSync(p).ctimeMs;
+    if (Number.isFinite(t) && t > 0) return t;
+  } catch { /* stat failed: sort last, never first */ }
+  return Infinity;
 }
 
 function drop(p) { try { unlinkSync(p); } catch { /* ignore */ } }
@@ -593,14 +637,21 @@ for (const p of armPaths()) {
   const arm = readArm(p);
   if (!isLive(arm, now)) continue;
   if (!scopeAllows(arm.cwd, payload.cwd)) continue;        // wrong project -> leave armed
-  candidates.push({ path: p, arm });
+  candidates.push({ path: p, arm, order: armOrder(p) });
 }
 if (!candidates.length) noop();
 
-// Oldest first: when two sessions in one project clear in the order they armed,
+// Oldest first, by the inode's change time rather than the flag's own `armed_at` —
+// see armOrder(). When two sessions in one project clear in the order they armed,
 // each gets its own checkpoint back. (Out-of-order clears can still mis-pair —
 // nothing in the payload says which session is clearing. See SKILL.md.)
-candidates.sort((x, y) => x.arm.armed_at - y.arm.armed_at || x.path.localeCompare(y.path));
+//
+// Compared with an explicit three-way rather than a subtraction: `Infinity - Infinity`
+// is NaN, and while NaN happens to be falsy and therefore happens to fall through to
+// the tiebreak, a comparator whose correctness rests on that is one edit away from
+// being wrong. Neither term reads a field the flag supplied.
+candidates.sort((x, y) =>
+  (x.order === y.order ? 0 : x.order < y.order ? -1 : 1) || x.path.localeCompare(y.path));
 
 let chosen = null;
 const refused = [];

@@ -101,6 +101,39 @@
   and `checkpoints/` are siblings and whoever can write the flag can usually write the
   file it names. Both still want the provenance check this entry is really about.
   (2026-08-07)
+  **Update: the sort-order half is closed; the provenance half is not, and this says
+  why it probably never will be.** Candidate ordering no longer reads `armed_at` at
+  all. It reads the inode's change time (`armOrder()`), which no POSIX call can set:
+  there is no syscall for it, and it moves *forward* as a side effect of every metadata
+  write — `touch -d 2020-01-01` and `utimesSync(0)` each leave mtime in the past and
+  ctime at the current time. Measured on Linux, not read off a manual page. So a
+  planted flag can no longer claim to predate an arm written before it, and the field
+  is ignored rather than clamped, so a forgery cannot push itself later either. Eight
+  assertions in group 23: three fail against the pre-change hook, and the remaining
+  five are positive controls plus a deliberate limit-pin — the assertion that a flag
+  planted BEFORE a real arm still wins, because this orders by write time and does not
+  authenticate the writer.
+  **Scope of that, narrower than the code looks:** ctime is a POSIX property. Windows
+  has no equivalent — libuv reports NTFS's ChangeTime, which the native API *can* set
+  — so there this is ordering by write time rather than a guarantee about it, and it is
+  untested on that platform. Ordering is also not a defence standing alone: losing the
+  sort costs an attacker one cycle, since the flag stays on disk and is a candidate
+  again at the next `/clear`. Group 23 asserts that too rather than leaving it implied.
+  **What remains is the injection, and no check available to this hook reaches it.**
+  Four shapes were weighed against this section's own threat model — an attacker
+  running as the same uid with write access under `~/.claude`. A MAC over the flag
+  needs a key stored where that attacker can read it. Ownership and mode are identical
+  because the uid is identical. Binding to the arming session is impossible for the
+  reason `arm.sh` already documents: `/clear` mints a new session id and the
+  SessionStart payload carries no link back to the pre-clear one. A content digest in
+  the flag is written by whoever writes the flag. The digest is the only one with any
+  residue — it would bind the restored bytes to the arm on a *gstack* install
+  specifically, where the checkpoint sits under `~/.gstack` and the flag under
+  `~/.claude`, so write access to one tree is not write access to the other. Not taken
+  here: an absent field is the downgrade, requiring the field strands arms in flight
+  across an upgrade, and it buys a sha256 with a four-way portability fallback in shell
+  for a gain confined to one install shape. Recorded as the only live idea, not as work
+  queued. (2026-08-07)
 
 - **`arm.sh` does not check the checkpoint root at arm time.** The hook refuses an
   out-of-root `checkpoint` on restore; `arm.sh` will still happily write the flag. So a

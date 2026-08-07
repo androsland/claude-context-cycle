@@ -1083,6 +1083,83 @@ else
 fi
 rm -f "$ARMD"/*.json
 
+echo "=== 23. Arms are ordered by write time, not by the flag's own armed_at ==="
+# `armed_at` is written by whoever wrote the flag. The candidate sort used to read it,
+# so a planted flag claiming a plausible earlier time sorted ahead of every legitimate
+# arm in its project and won every /clear outright, rather than having to win a race.
+# Ordering now runs on the inode's change time, which no POSIX call can set.
+#
+# The planted flags below are what an attacker with write access to armed.d would
+# actually write: well-formed, `cwd` matching the project, and the checkpoint inside an
+# allowed root so group 22's confinement passes them. `armed_at` is a minute ago, not 0
+# or 1 — the shape check in isLive() rejects those, and asserting against a forgery the
+# shape check already stops would test nothing.
+#
+# The filename sorts AFTER a hash-named real arm, so the path tiebreak favours the
+# legitimate flag. That does not soften the discriminators: against the pre-change hook
+# the two armed_at values differ by a minute, so the comparator returns on the first
+# term and the tiebreak is never consulted.
+rm -f "$ARMD"/*.json
+P23="$ROOT/p23"; mkproj "$P23"
+C23L="$CPD/p23-legit.md";   mkcp "$C23L" "LEGIT"
+C23M="$CPD/p23-legit2.md";  mkcp "$C23M" "LEGIT2"
+C23P="$CPD/p23-planted.md"; mkcp "$C23P" "PLANTED"
+arm23()   { (cd "$P23" && CLAUDE_CODE_SESSION_ID="$1" bash "$ARM" "$2" >/dev/null 2>&1); }
+# plant23 <slot> <checkpoint> <armed_at>
+plant23() { cat > "$ARMD/zz-planted-$1.json" <<EOF
+{ "checkpoint": "$(winp "$2")", "branch": "testbr", "cwd": "$(winp "$P23")", "armed_at": $3 }
+EOF
+}
+
+# The attack: arm legitimately, then plant a flag backdated to before that arm.
+arm23 s23a "$C23L"
+sleep 1
+plant23 a "$C23P" "$(( $(date +%s) - 60 ))"
+eq "planted flag and real arm coexist" "2" "$(arms)"
+eq "the real arm restores first, not the backdated one" \
+   '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(clear_in "$P23")"
+# Deliberately asserted rather than left implicit: losing the sort costs an attacker
+# one cycle and nothing more. The flag is not consumed, not swept, and is a candidate
+# again at the very next /clear. Ordering is not a defence on its own.
+eq "the planted flag is still there and fires on the next clear" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+eq "both flags are consumed after two clears" "0" "$(arms)"
+
+# The limit, pinned so it cannot be mistaken for coverage: this orders by when a flag
+# was written, it does not authenticate who wrote it. A flag planted BEFORE a real arm
+# genuinely is older and still sorts first. Passes against the pre-change hook too.
+rm -f "$ARMD"/*.json
+plant23 b "$C23P" "$(( $(date +%s) - 60 ))"
+sleep 1
+arm23 s23b "$C23L"
+eq "a flag planted BEFORE the real arm still wins — write order, not provenance" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
+# armed_at is ignored, not clamped: a flag cannot push itself LATER either. Written
+# first with a stamp a day in the future, it still sorts first. Against the pre-change
+# hook the future stamp sent it to the back and the real arm restored instead, so this
+# is a discriminator in the opposite direction from the one above.
+plant23 c "$C23P" "$(( $(date +%s) + 86400 ))"
+sleep 1
+arm23 s23c "$C23L"
+eq "a future-stamped flag written first is not sorted to the back" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
+# Positive control: the ordering the sort exists for still holds. Two sessions arming
+# in one project, cleared in the order they armed, each get their own checkpoint back.
+# Passes on both hooks — it is here so a change that fixed the forgery by breaking
+# legitimate pairing cannot go unnoticed.
+arm23 s23d "$C23L"
+sleep 1
+arm23 s23e "$C23M"
+eq "two real arms: first clear gets the older" \
+   '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(clear_in "$P23")"
+eq "two real arms: second clear gets the newer" \
+   '✓ Restored: "LEGIT2" · next: finish LEGIT2 (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
 [ "$SKIP" -eq 0 ] || printf 'skipped on this platform (%s):%s\n' "$(uname -s 2>/dev/null || echo unknown)" "$SKIPPED"

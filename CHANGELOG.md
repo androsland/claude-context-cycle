@@ -96,6 +96,29 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   closing:** prompt injection. `armed.d/` and `checkpoints/` are siblings, so whoever
   can plant the flag can almost always plant the file it points at. This narrows what
   can be injected, not whether — that still needs the provenance check in `TODOS.md`.
+- **A planted arm flag can no longer jump the queue by claiming to be old.** When two
+  arms match the same project the hook consumes the oldest, and "oldest" was read out
+  of the flag's own `armed_at` — a field written by whoever wrote the flag. So a
+  planted one backdated by a minute sorted ahead of every legitimate arm in that
+  project and won every `/clear` outright, rather than having to win a race it might
+  lose. The earlier `armed_at > 0` check only removed the laziest spelling: `1` worked
+  exactly as well as `0`. Ordering now runs on the inode's change time, which no POSIX
+  call can set — there is no syscall for it, and it moves *forward* as a side effect of
+  every metadata write, so `touch -d 2020-01-01` and a `utimes()` to the epoch each
+  leave mtime in the past and ctime at the current time. Measured, not read off a
+  manual page. `armed_at` is now ignored for ordering rather than clamped, so a forgery
+  cannot push itself later either, and nothing in the comparator reads a field the flag
+  supplied. Eight assertions in a new group 23, three of which fail against the hook as
+  it stood. **Two limits, asserted rather than described.** This orders by *when* a
+  flag was written and does not authenticate *who* wrote it, so a flag planted before a
+  real arm genuinely is older and still sorts first. And ordering is not a defence on
+  its own: losing the sort costs an attacker one cycle, because the flag stays on disk
+  and is a candidate again at the next `/clear`. **And a scope note:** ctime is a POSIX
+  property; Windows has no equivalent — libuv reports NTFS's ChangeTime, which the
+  native API can set — so there this is ordering by write time rather than a guarantee
+  about it, and it is untested on that platform. The other half of the arm-flag trust
+  problem, injection, is unchanged and stays in `TODOS.md`, which now also records why
+  a provenance check is unlikely to arrive.
 - **`./install.sh` actually runs now.** Both `install.sh` and `uninstall.sh` shipped
   tracked as `100644`, so the README's own clone path — `./install.sh` — failed with
   `Permission denied` on the very first step. The `curl | bash` route pipes into an

@@ -147,8 +147,9 @@ where `/context-restore` and `/context-save list` can find them too.
 ### Known limitation
 
 When **two sessions in the same project** are both armed, the hook consumes the
-**oldest** matching flag. That pairs correctly when the sessions clear in the order
-they armed, and mis-pairs when they don't — nothing in the `SessionStart` payload
+**oldest** matching flag — oldest by when the flag was written, not by the timestamp
+inside it. That pairs correctly when the sessions clear in the order they armed, and
+mis-pairs when they don't — nothing in the `SessionStart` payload
 identifies which session is clearing, so the hook cannot do better. This is why the
 clear-time banner names the checkpoint it restored (`✓ Restored: "…"`): a mis-pair is
 visible immediately rather than silent. Re-run `/context-cycle` if the banner isn't
@@ -163,7 +164,14 @@ context. It does **not** close prompt injection. Whoever can write an arm flag i
 file into `~/.claude/context-cycle/checkpoints/` and point the flag at that — the two
 directories sit side by side. The confinement narrows *what* can be injected, not
 *whether*. Nor does it verify who wrote the arm; that would need a provenance check,
-which is still open in `TODOS.md`.
+which is still open in `TODOS.md` — along with why it is unlikely to arrive.
+
+What a planted flag *cannot* do any more is jump the queue. When two arms match one
+project the hook takes the oldest, and "oldest" is now the inode's change time rather
+than the `armed_at` the flag writes about itself, so a forgery cannot claim to predate
+a real arm. It still fires if there is no real arm to lose to, and a flag planted
+*before* one genuinely is older — this orders by when a flag was written, not by who
+wrote it.
 
 ### Where checkpoints live
 
