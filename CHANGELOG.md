@@ -137,7 +137,10 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   FIFO, and opening the read end of one with no writer *blocks* — measured, the open
   hung until the process was killed at 8s and returned in 0ms with the flag set. The
   sweep runs on every session start, not only on a `/clear`, so that would have stalled
-  startup rather than mis-sorted a restore. Both flags are POSIX;
+  startup rather than mis-sorted a restore. That one has no discriminator either, and
+  for the same reason as the swap: a FIFO planted before the hook runs never reaches
+  the open, so the two assertions covering it stay green with the constant reverted.
+  They guard the outer gate; the flag went in on the code path. Both flags are POSIX;
   Node reports them undefined on Windows, the same platform where ctime is not a
   guarantee either.
   The staleness disclosure was re-coupled to the same clock in the same pass: it read

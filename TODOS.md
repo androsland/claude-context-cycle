@@ -31,7 +31,21 @@
   clears against the *vulnerable* hook, so a green run would prove nothing and would
   read as coverage. Widening the window means editing the hook, which tests something
   other than what ships. Left uncovered deliberately; the reasoning is the test.
-  (security review follow-up, 2026-08-07)
+  **The `O_NONBLOCK` alongside it inherits exactly this, and its two group-24
+  assertions are not evidence for it.** A FIFO planted in `armed.d` before the hook
+  runs is bucketed by `scanArms()`'s `lstat` and never reaches `openSync` at all, so
+  those assertions pass identically with the constant reverted — run and confirmed
+  against a stripped hook, not inferred from the code. They earn their place guarding
+  the *outer* gate: a regression that dropped the `lstat` would hang session startup,
+  and the `timeout` wrapper turns that into one red assertion instead of a suite that
+  never finishes. The flag itself is defence in depth for a path whose own comment
+  says the `lstat` is not what makes the read safe, and it costs one constant.
+  Two ways to close the gap were considered and both refused: a probabilistic race
+  test loses the same race (0 of 400), and exporting `openArm` behind a main-guard
+  would make a hook that must always run depend on `import.meta.url` matching
+  `process.argv[1]` — a mismatch under a symlinked `~/.claude`, which this project
+  explicitly supports, silently no-ops every restore. That trades a total failure mode
+  for one assertion. (security review follow-up, 2026-08-07)
 - **Half of the staleness reconciliation is untestable in the suite.** The restore
   banner now reports the *older* of the flag's own `armed_at` and the inode's change
   time, so a flag stamped `now` can no longer read as fresh however long it has sat on

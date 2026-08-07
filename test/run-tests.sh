@@ -1240,6 +1240,11 @@ fi
 # a regression that dropped the lstat and relied on O_NOFOLLOW alone would hang
 # session startup, not merely mis-sort. Wrapped in `timeout` so that regression shows
 # up as one red assertion instead of a suite that never finishes.
+# Say the limit rather than let the group's name imply otherwise: these two are NOT a
+# discriminator for the O_NONBLOCK that ships with them. Reverting that constant alone
+# leaves both green, because from here the open is never reached — checked by running
+# the suite against a stripped hook, not assumed. The flag is only reachable through
+# the scan→open race, which the suite cannot win; see TODOS.md.
 if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   rm -f "$ARMD"/*.json
   arm23 s24c "$C23L"
