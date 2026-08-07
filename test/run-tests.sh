@@ -22,7 +22,10 @@ command -v git  >/dev/null 2>&1 || { echo "git is required"  >&2; exit 2; }
 # path /cfg — harmless as a normal user, but this suite writes and deletes files,
 # and CI containers run as root.
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/context-cycle-test.XXXXXX")" || ROOT=""
-[ -n "$ROOT" ] && [ -d "$ROOT" ] || { echo "mktemp -d failed; refusing to run" >&2; exit 2; }
+if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+  echo "mktemp -d failed; refusing to run" >&2
+  exit 2
+fi
 trap 'rm -rf "$ROOT"' EXIT
 
 # Path form for anything handed to node or written into an arm flag. The restore
@@ -86,6 +89,14 @@ count() { wc -l | tr -d ' '; }
 CAN_SYMLINK=0
 ln -s "$ROOT" "$ROOT/.symprobe" 2>/dev/null && [ -L "$ROOT/.symprobe" ] && CAN_SYMLINK=1
 rm -f "$ROOT/.symprobe" 2>/dev/null
+# Hardlinks are a separate capability from symlinks and fail for different reasons —
+# FAT32, some container overlay mounts, and a Git Bash without the NTFS privilege.
+# Group 24 needs one to prove the ctime ordering survives a link(), which is the
+# reason a hardlink is NOT refused where a symlink is.
+CAN_HARDLINK=0
+: > "$ROOT/.hardsrc" 2>/dev/null
+ln "$ROOT/.hardsrc" "$ROOT/.hardprobe" 2>/dev/null && [ -f "$ROOT/.hardprobe" ] && CAN_HARDLINK=1
+rm -f "$ROOT/.hardsrc" "$ROOT/.hardprobe" 2>/dev/null
 CAN_ODD_NAMES=0
 ODDPROBE="$ROOT/$(printf 'o\vd"d')"
 : > "$ODDPROBE" 2>/dev/null && [ -f "$ODDPROBE" ] && CAN_ODD_NAMES=1
@@ -158,6 +169,13 @@ refused_in() {
     *) echo "$b" ;;
   esac
 }
+# Group 24's banner carries a restore receipt AND a warning in one systemMessage, so
+# the exact-match style used everywhere else would conflate the two. Split them:
+# restored_line() is the receipt or '' when nothing was restored (a warning-only banner
+# must never read as a restore), odd_note() is whether the not-a-regular-file warning
+# was there at all — the point being that a refusal is reported rather than silent.
+restored_line() { case "$1" in '✓ Restored'*) printf '%s\n' "$1" | head -1 ;; *) echo "" ;; esac; }
+odd_note() { case "$1" in *"not a regular file"*) echo "warned" ;; *) echo "silent" ;; esac; }
 mkcp() { printf '## Working on: %s\n\n### Remaining Work\n1. finish %s\n' "$2" "$2" > "$1"; }
 mkproj() { mkdir -p "$1"; git -C "$1" init -q -b testbr 2>/dev/null; git -C "$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null; }
 # Count arm flags by glob rather than `ls | grep -c` (SC2010): the glob asks the shell
@@ -970,11 +988,19 @@ eq "an out-of-root checkpoint is armed but not restored" "refused" "$(refused_in
 # project keeps finding: the /clear looks ordinary and the context never comes back.
 REFUSE22=$(node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
    "$(winp "$P22")" | node "$HOOK")
+# Every `case` inside a `$( )` here writes its patterns in the optional-leading-paren
+# form, `(pat)` rather than `pat)`, and that is load-bearing rather than a style: bash
+# 3.2 — which is /bin/bash on macOS, and what the macos-latest job runs — scans a `$( )`
+# for the matching paren instead of parsing it, so a case pattern's own `)` ends the
+# substitution early. The tail then reaches the shell as a bare command and the
+# assertion compares against `   echo 1;; *) echo 0;; esac)`. It failed loudly on macOS
+# (five assertions, plus five `syntax error near unexpected token` lines) while Linux
+# and Git Bash — bash 5 — were green, so a local run cannot see it.
 eq "and the user is told why, with the escape hatch named" "1" \
-   "$(case "$REFUSE22" in *"outside the known"*CONTEXT_CYCLE_CHECKPOINT_ROOTS*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REFUSE22" in (*"outside the known"*CONTEXT_CYCLE_CHECKPOINT_ROOTS*) echo 1;; (*) echo 0;; esac)"
 eq "the refused arm is NOT consumed" "1" "$(arms)"
 eq "and nothing was injected into model context" "0" \
-   "$(case "$REFUSE22" in *additionalContext*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REFUSE22" in (*additionalContext*) echo 1;; (*) echo 0;; esac)"
 # Recoverability end-to-end: the same arm, still on disk, restores once the root is
 # declared. This is why a refusal must not drop the flag — a mis-derived root would
 # otherwise destroy a legitimate pending restore instead of merely delaying it.
@@ -1009,7 +1035,7 @@ EOF
 REL22=$( cd "$P22" && node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
    "$(winp "$P22")" | node "$HOOK" )
 eq "a relative checkpoint path is refused even when it resolves" "1" \
-   "$(case "$REL22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REL22" in (*"outside the known"*) echo 1;; (*) echo 0;; esac)"
 eq "...and it stays armed like any other refusal" "1" "$(arms)"
 rm -f "$ARMD"/*.json "$P22/relnotes.md"
 
@@ -1042,9 +1068,9 @@ C22OK="$CPD/p22-ok.md"; mkcp "$C22OK" "LEGIT"
 arm22 s22x "$C22"; sleep 1; arm22 s22y "$C22OK"
 BOTH22=$(clear_in "$P22")
 eq "a refused arm does not block a good one behind it" "1" \
-   "$(case "$BOTH22" in '✓ Restored: "LEGIT"'*) echo 1;; *) echo 0;; esac)"
+   "$(case "$BOTH22" in ('✓ Restored: "LEGIT"'*) echo 1;; (*) echo 0;; esac)"
 eq "...and the successful banner still reports the refusal" "1" \
-   "$(case "$BOTH22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+   "$(case "$BOTH22" in (*"outside the known"*) echo 1;; (*) echo 0;; esac)"
 eq "the refused arm is still armed after that restore" "1" "$(arms)"
 rm -f "$ARMD"/*.json
 
@@ -1082,6 +1108,183 @@ else
   skip "group 22 symlink half" "this shell/filesystem does not create real symlinks"
 fi
 rm -f "$ARMD"/*.json
+
+echo "=== 23. Arms are ordered by write time, not by the flag's own armed_at ==="
+# `armed_at` is written by whoever wrote the flag. The candidate sort used to read it,
+# so a planted flag claiming a plausible earlier time sorted ahead of every legitimate
+# arm in its project and won every /clear outright, rather than having to win a race.
+# Ordering now runs on the inode's change time, which no POSIX call can set.
+#
+# The planted flags below are what an attacker with write access to armed.d would
+# actually write: well-formed, `cwd` matching the project, and the checkpoint inside an
+# allowed root so group 22's confinement passes them. `armed_at` is a minute ago, not 0
+# or 1 — the shape check in isLive() rejects those, and asserting against a forgery the
+# shape check already stops would test nothing.
+#
+# The filename sorts AFTER a hash-named real arm, so the path tiebreak favours the
+# legitimate flag. That does not soften the discriminators: against the pre-change hook
+# the two armed_at values differ by a minute, so the comparator returns on the first
+# term and the tiebreak is never consulted.
+rm -f "$ARMD"/*.json
+P23="$ROOT/p23"; mkproj "$P23"
+C23L="$CPD/p23-legit.md";   mkcp "$C23L" "LEGIT"
+C23M="$CPD/p23-legit2.md";  mkcp "$C23M" "LEGIT2"
+C23P="$CPD/p23-planted.md"; mkcp "$C23P" "PLANTED"
+arm23()   { (cd "$P23" && CLAUDE_CODE_SESSION_ID="$1" bash "$ARM" "$2" >/dev/null 2>&1); }
+# plant23 <slot> <checkpoint> <armed_at>
+plant23() { cat > "$ARMD/zz-planted-$1.json" <<EOF
+{ "checkpoint": "$(winp "$2")", "branch": "testbr", "cwd": "$(winp "$P23")", "armed_at": $3 }
+EOF
+}
+
+# The attack: arm legitimately, then plant a flag backdated to before that arm.
+arm23 s23a "$C23L"
+sleep 1
+plant23 a "$C23P" "$(( $(date +%s) - 60 ))"
+eq "planted flag and real arm coexist" "2" "$(arms)"
+eq "the real arm restores first, not the backdated one" \
+   '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(clear_in "$P23")"
+# Deliberately asserted rather than left implicit: losing the sort costs an attacker
+# one cycle and nothing more. The flag is not consumed, not swept, and is a candidate
+# again at the very next /clear. Ordering is not a defence on its own.
+eq "the planted flag is still there and fires on the next clear" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+eq "both flags are consumed after two clears" "0" "$(arms)"
+
+# The limit, pinned so it cannot be mistaken for coverage: this orders by when a flag
+# was written, it does not authenticate who wrote it. A flag planted BEFORE a real arm
+# genuinely is older and still sorts first. Passes against the pre-change hook too.
+rm -f "$ARMD"/*.json
+plant23 b "$C23P" "$(( $(date +%s) - 60 ))"
+sleep 1
+arm23 s23b "$C23L"
+eq "a flag planted BEFORE the real arm still wins — write order, not provenance" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
+# armed_at is ignored, not clamped: a flag cannot push itself LATER either. Written
+# first with a stamp a day in the future, it still sorts first. Against the pre-change
+# hook the future stamp sent it to the back and the real arm restored instead, so this
+# is a discriminator in the opposite direction from the one above.
+plant23 c "$C23P" "$(( $(date +%s) + 86400 ))"
+sleep 1
+arm23 s23c "$C23L"
+eq "a future-stamped flag written first is not sorted to the back" \
+   '✓ Restored: "PLANTED" · next: finish PLANTED (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
+# Positive control: the ordering the sort exists for still holds. Two sessions arming
+# in one project, cleared in the order they armed, each get their own checkpoint back.
+# Passes on both hooks — it is here so a change that fixed the forgery by breaking
+# legitimate pairing cannot go unnoticed.
+arm23 s23d "$C23L"
+sleep 1
+arm23 s23e "$C23M"
+eq "two real arms: first clear gets the older" \
+   '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(clear_in "$P23")"
+eq "two real arms: second clear gets the newer" \
+   '✓ Restored: "LEGIT2" · next: finish LEGIT2 (testbr)' "$(clear_in "$P23")"
+rm -f "$ARMD"/*.json
+
+echo "=== 24. An armed.d entry that is not a regular file is never read ==="
+# The bypass group 23's ordering had on its own. Both readFileSync (content) and
+# statSync (the sort key) FOLLOW a symlink and report the TARGET, so a link grafts a
+# fresh directory entry onto an inode the attacker last touched whenever they liked —
+# no race, no backdating, and the ctime sort reads the staged file's untouched time.
+# Reproduced against the version of the hook that had the ctime sort but not the
+# refusal: a flag staged outside armed.d, then linked in two seconds AFTER a legitimate
+# arm, still sorted first and restored the planted checkpoint.
+rm -f "$ARMD"/*.json
+# plant_file <path> <checkpoint> — a well-formed flag for P23, written somewhere the
+# hook does not look. Its ctime is set here and never moves again.
+plant_file() { cat > "$1" <<EOF
+{ "checkpoint": "$(winp "$2")", "branch": "testbr", "cwd": "$(winp "$P23")", "armed_at": $(date +%s) }
+EOF
+}
+if [ "$CAN_SYMLINK" -eq 1 ]; then
+  S24="$ROOT/staged-24.json"; plant_file "$S24" "$C23P"
+  sleep 1
+  arm23 s24a "$C23L"
+  sleep 1
+  ln -s "$S24" "$ARMD/zz-linked.json"
+  B24="$(clear_in "$P23")"
+  eq "a symlinked entry does not win the sort" \
+     '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$B24")"
+  eq "and the skip is reported, not silent" "warned" "$(odd_note "$B24")"
+  # Losing one sort is not the property being claimed — a symlink must be inert, not
+  # merely later. The next clear has no legitimate arm left for it to lose to.
+  eq "the link is still on disk (the hook does not delete what it won't read)" \
+     "present" "$([ -L "$ARMD/zz-linked.json" ] && echo present || echo absent)"
+  B24B="$(clear_in "$P23")"
+  eq "with nothing to lose to, it still restores nothing" "" "$(restored_line "$B24B")"
+  eq "and says so again rather than clearing into silence" "warned" "$(odd_note "$B24B")"
+  rm -f "$ARMD"/*.json "$S24"
+else
+  skip "24 (symlinked armed.d entry)" "this filesystem cannot create symlinks"
+fi
+
+# A hardlink is deliberately NOT refused, and that is a claim needing evidence rather
+# than reasoning: it is a regular file, so scanArms() admits it, and the ordering
+# guarantee has to survive on its own. link() is a metadata write and moves the target
+# inode's ctime FORWARD, so a hardlink planted after a real arm sorts after it. If that
+# were ever false, this group goes red instead of the refusal quietly under-covering.
+if [ "$CAN_HARDLINK" -eq 1 ]; then
+  H24="$ROOT/staged-24-hard.json"; plant_file "$H24" "$C23P"
+  sleep 1
+  arm23 s24b "$C23L"
+  sleep 1
+  if ln "$H24" "$ARMD/zz-hard.json" 2>/dev/null; then
+    eq "a hardlinked flag is accepted but link() moved its ctime forward" \
+       '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$(clear_in "$P23")")"
+  else
+    skip "24 (hardlinked armed.d entry)" "ln refused to link into the state dir"
+  fi
+  rm -f "$ARMD"/*.json "$H24"
+else
+  skip "24 (hardlinked armed.d entry)" "this filesystem cannot create hardlinks"
+fi
+
+# A FIFO is the other thing that can sit on a flag path, and it fails differently:
+# O_NOFOLLOW says nothing about one, and opening the read end with no writer BLOCKS.
+# The lstat in scanArms() is what keeps a statically planted one from ever reaching
+# the open, so this asserts the outer layer holds AND that the hook returns at all —
+# a regression that dropped the lstat and relied on O_NOFOLLOW alone would hang
+# session startup, not merely mis-sort. Wrapped in `timeout` so that regression shows
+# up as one red assertion instead of a suite that never finishes.
+# Say the limit rather than let the group's name imply otherwise: these two are NOT a
+# discriminator for the O_NONBLOCK that ships with them. Reverting that constant alone
+# leaves both green, because from here the open is never reached — checked by running
+# the suite against a stripped hook, not assumed. The flag is only reachable through
+# the scan→open race, which the suite cannot win; see TODOS.md.
+if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  rm -f "$ARMD"/*.json
+  arm23 s24c "$C23L"
+  if ! mkfifo "$ARMD/zz-fifo.json" 2>/dev/null; then
+    skip "24 (FIFO on a flag path)" "mkfifo refused inside the state dir"
+  elif [ "$(node -e 'let r="no";try{r=require("fs").lstatSync(process.argv[1]).isFIFO()?"yes":"no"}catch(e){}process.stdout.write(r)' "$(winp "$ARMD/zz-fifo.json")")" != "yes" ]; then
+    # `command -v mkfifo` is not the capability this group needs, which is why it was
+    # the wrong probe: under Git Bash MSYS emulates FIFOs, so mkfifo succeeds and the
+    # outer guard passes, but the native-Windows node that RUNS the hook lstats the
+    # result as an ordinary file. There is then no non-regular entry for scanArms() to
+    # refuse, the banner is correctly silent, and asserting "warned" measured MSYS
+    # rather than the hook — one red assertion on windows-latest and nothing wrong.
+    # Ask the runtime that does the work whether it sees a FIFO, the way group 14b's
+    # probe asks the filesystem, rather than branching on `uname` (TODOS.md records
+    # what that assumption cost there). Both assertions go together: with no FIFO in
+    # the hook's view, the non-hang half is not exercising a FIFO either.
+    rm -f "$ARMD/zz-fifo.json"
+    skip "24 (FIFO on a flag path)" "mkfifo ran, but node's lstat does not report a FIFO here"
+  else
+    B24F="$(timeout 20 node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1],session_id:"post-clear-new-uuid"}))' "$(winp "$P23")" | timeout 20 node "$HOOK" | jsonf banner)"
+    eq "a FIFO on a flag path does not hang the hook, and the arm still restores" \
+       '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$B24F")"
+    eq "and the FIFO is reported like any other non-regular entry" "warned" "$(odd_note "$B24F")"
+    rm -f "$ARMD/zz-fifo.json"
+  fi
+  rm -f "$ARMD"/*.json
+else
+  skip "24 (FIFO on a flag path)" "mkfifo or timeout is unavailable"
+fi
 
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"

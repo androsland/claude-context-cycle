@@ -96,6 +96,71 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   closing:** prompt injection. `armed.d/` and `checkpoints/` are siblings, so whoever
   can plant the flag can almost always plant the file it points at. This narrows what
   can be injected, not whether — that still needs the provenance check in `TODOS.md`.
+- **A planted arm flag can no longer jump the queue by claiming to be old.** When two
+  arms match the same project the hook consumes the oldest, and "oldest" was read out
+  of the flag's own `armed_at` — a field written by whoever wrote the flag. So a
+  planted one backdated by a minute sorted ahead of every legitimate arm in that
+  project and won every `/clear` outright, rather than having to win a race it might
+  lose. The earlier `armed_at > 0` check only removed the laziest spelling: `1` worked
+  exactly as well as `0`. Ordering now runs on the inode's change time, which no POSIX
+  call can set — there is no syscall for it, and it moves *forward* as a side effect of
+  every metadata write, so `touch -d 2020-01-01` and a `utimes()` to the epoch each
+  leave mtime in the past and ctime at the current time. Measured, not read off a
+  manual page. `armed_at` is now ignored for ordering rather than clamped, so a forgery
+  cannot push itself later either, and nothing in the comparator reads a field the flag
+  supplied. Eight assertions in a new group 23, three of which fail against the hook as
+  it stood. **The ordering alone was not enough, and the first version of this change
+  shipped with the hole open.** `statSync` and `readFileSync` both *follow* a symlink
+  and report the target, so a symlinked entry in `armed.d/` grafts a fresh directory
+  entry onto an inode the attacker last touched whenever they liked — no race, no
+  backdating, and the sort read the staged file's untouched ctime. Reproduced against
+  the ordering fix itself: a flag staged outside `armed.d/`, then linked in two seconds
+  *after* a legitimate arm, still sorted first and restored the planted checkpoint. An
+  entry that is not a regular file is now refused before anything reads it, checked
+  with `lstat` at the one place both the sweep and the candidate scan go through.
+  Refused rather than ordered by the link's own ctime: nothing legitimate makes an arm
+  flag a link, and this file already refuses a symlinked `context-cycle/` or `armed.d/`
+  one level up. A refused entry is left on disk — the hook does not delete what it
+  declines to read — and is **reported in the banner**, because a silent non-restore on
+  a setup that works is the failure this project keeps finding. A hardlink is *not*
+  refused and does not need to be: it is a regular file, and `link()` is a metadata
+  write that moves the inode's ctime forward, which group 24 asserts rather than
+  assumes. Six assertions in a new group 24, five of which fail against the
+  ordering-only hook. **The `lstat` on its own was still a check-then-use**, and that
+  went too: classifying by path and then reading by path left a window to swap the
+  entry through, so every candidate is now opened once with `O_NOFOLLOW` and the
+  regular-file check, the sort key and the content all come off that one descriptor.
+  The window was *not* demonstrated — a toggle loop at ~700 cycles/s won 0 of 400
+  clears against the pre-fix hook — and it went in on the shape of the code path
+  rather than on a reproduction, because it costs one syscall. The open also carries
+  `O_NONBLOCK`, which is not about forgery at all: `O_NOFOLLOW` says nothing about a
+  FIFO, and opening the read end of one with no writer *blocks* — measured, the open
+  hung until the process was killed at 8s and returned in 0ms with the flag set. The
+  sweep runs on every session start, not only on a `/clear`, so that would have stalled
+  startup rather than mis-sorted a restore. That one has no discriminator either, and
+  for the same reason as the swap: a FIFO planted before the hook runs never reaches
+  the open, so the two assertions covering it stay green with the constant reverted.
+  They guard the outer gate; the flag went in on the code path. Both flags are POSIX;
+  Node reports them undefined on Windows, the same platform where ctime is not a
+  guarantee either.
+  The staleness disclosure was re-coupled to the same clock in the same pass: it read
+  `armed_at` while ordering read ctime, so a flag stamped `now` read as fresh however
+  long it had sat there. Age is now the *older* of the two, which also fixes an honest
+  case — a flag written while the machine's clock was wrong now reports its real age.
+  **Two limits, asserted rather than described.** This orders by *when* a
+  flag was written and does not authenticate *who* wrote it, so a flag planted before a
+  real arm genuinely is older and still sorts first. And ordering is not a defence on
+  its own: losing the sort costs an attacker one cycle, because the flag stays on disk
+  and is a candidate again at the next `/clear`. **And a scope note:** "cannot be
+  forged" means "not by any call that operates on the file" — whoever serves the
+  filesystem under `armed.d/` or sets the system clock can still state any ctime, both
+  strictly stronger primitives than writing an arm flag and so inside the same threat
+  bound. ctime is also a POSIX
+  property; Windows has no equivalent — libuv reports NTFS's ChangeTime, which the
+  native API can set — so there this is ordering by write time rather than a guarantee
+  about it, and it is untested on that platform. The other half of the arm-flag trust
+  problem, injection, is unchanged and stays in `TODOS.md`, which now also records why
+  a provenance check is unlikely to arrive.
 - **`./install.sh` actually runs now.** Both `install.sh` and `uninstall.sh` shipped
   tracked as `100644`, so the README's own clone path — `./install.sh` — failed with
   `Permission denied` on the very first step. The `curl | bash` route pipes into an

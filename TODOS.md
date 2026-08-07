@@ -22,6 +22,40 @@
   but a `uname` branch built on the same assumption would have skipped a group that
   works, silently. Worth remembering when the temptation is to hard-code a platform
   rather than ask it. (CI work, 2026-08-05; 14b claim corrected 2026-08-06)
+- **The arm-flag TOCTOU has no in-suite discriminator.** Group 24 covers the outer
+  layer — an `armed.d` entry that is a symlink when the hook looks is refused and
+  reported — and those five assertions do fail against the hook without it. The inner
+  layer, `openArm()`'s `O_NOFOLLOW`, only matters when the entry *changes type between*
+  the scan and the read, and a test for it has to win a race the attacker also has to
+  win. A bounded toggle loop is not a discriminator: at ~700 cycles/s it won 0 of 400
+  clears against the *vulnerable* hook, so a green run would prove nothing and would
+  read as coverage. Widening the window means editing the hook, which tests something
+  other than what ships. Left uncovered deliberately; the reasoning is the test.
+  **The `O_NONBLOCK` alongside it inherits exactly this, and its two group-24
+  assertions are not evidence for it.** A FIFO planted in `armed.d` before the hook
+  runs is bucketed by `scanArms()`'s `lstat` and never reaches `openSync` at all, so
+  those assertions pass identically with the constant reverted — run and confirmed
+  against a stripped hook, not inferred from the code. They earn their place guarding
+  the *outer* gate: a regression that dropped the `lstat` would hang session startup,
+  and the `timeout` wrapper turns that into one red assertion instead of a suite that
+  never finishes. The flag itself is defence in depth for a path whose own comment
+  says the `lstat` is not what makes the read safe, and it costs one constant.
+  Two ways to close the gap were considered and both refused: a probabilistic race
+  test loses the same race (0 of 400), and exporting `openArm` behind a main-guard
+  would make a hook that must always run depend on `import.meta.url` matching
+  `process.argv[1]` — a mismatch under a symlinked `~/.claude`, which this project
+  explicitly supports, silently no-ops every restore. That trades a total failure mode
+  for one assertion. (security review follow-up, 2026-08-07)
+- **Half of the staleness reconciliation is untestable in the suite.** The restore
+  banner now reports the *older* of the flag's own `armed_at` and the inode's change
+  time, so a flag stamped `now` can no longer read as fresh however long it has sat on
+  disk. Group 8 pins one direction — an old `armed_at` on a freshly written flag must
+  still report old, i.e. the `max()` must not have quietly replaced the field. The
+  converse needs a flag whose *inode* is older than `STALE_AFTER` (4h), and ctime
+  cannot be moved backwards by construction: the suite would have to wait four hours
+  or move the system clock, neither of which belongs in a unit run. Reproducing it by
+  hand costs a `sleep`, which is what it will take if that path ever regresses.
+  (security review follow-up, 2026-08-07)
 - **The `/a/notes.md` path-rewrite case is not reachable from CI.** The fix stops
   `arm.sh` mangling a checkpoint under a single-letter top-level directory into a
   Windows drive path, but asserting it needs a directory at the filesystem root,
@@ -101,6 +135,77 @@
   and `checkpoints/` are siblings and whoever can write the flag can usually write the
   file it names. Both still want the provenance check this entry is really about.
   (2026-08-07)
+  **Update: the sort-order half is closed; the provenance half is not, and this says
+  why it probably never will be.** Candidate ordering no longer reads `armed_at` at
+  all. It reads the inode's change time (`armOrder()`), which no POSIX call can set:
+  there is no syscall for it, and it moves *forward* as a side effect of every metadata
+  write — `touch -d 2020-01-01` and `utimesSync(0)` each leave mtime in the past and
+  ctime at the current time. Measured on Linux, not read off a manual page. So a
+  planted flag can no longer claim to predate an arm written before it, and the field
+  is ignored rather than clamped, so a forgery cannot push itself later either. Eight
+  assertions in group 23: three fail against the pre-change hook, and the remaining
+  five are positive controls plus a deliberate limit-pin — the assertion that a flag
+  planted BEFORE a real arm still wins, because this orders by write time and does not
+  authenticate the writer.
+  **The ordering alone did not hold, and the first version of this fix shipped with the
+  hole open.** `statSync` and `readFileSync` both follow a symlink and report the
+  target, so a symlinked entry in `armed.d/` grafts a fresh directory entry onto an
+  inode the attacker last touched whenever they liked — the sort read the staged file's
+  untouched ctime. Reproduced against the ordering fix: a flag staged outside
+  `armed.d/`, then linked in two seconds *after* a legitimate arm, still sorted first
+  and restored. An entry that is not a regular file is now refused with `lstat` at the
+  single choke point the sweep and the candidate scan share, left on disk rather than
+  deleted, and reported in the banner rather than skipped in silence. A hardlink is not
+  refused and does not need to be — it is a regular file and `link()` moves the inode's
+  ctime forward — which group 24 asserts rather than assumes. Six assertions in group
+  24, five of which fail against the ordering-only hook. Found by the security reviewer
+  on this branch's own diff and reproduced independently before acting on it.
+  **And the `lstat` refusal on its own was still a check-then-use.** `scanArms()`
+  classified by path; `readFileSync(path)` and `statSync(path)` afterwards each
+  resolved the name again, and both follow symlinks — so an attacker who leaves a
+  regular file in `armed.d/` long enough to be classified, then swaps it for a symlink
+  at a pre-staged old-ctime file, is back to the same forgery. Every candidate is now
+  opened once with `O_NOFOLLOW` (`openArm()`), and the regular-file check, the sort key
+  and the content all come off that one descriptor; the `lstat` stays only because it
+  is what makes a non-flag entry *reportable* and keeps the sweep from considering one.
+  **The window was not demonstrated, and that is stated rather than glossed:** a
+  toggle loop swapping the entry between a regular file and a symlink at ~700 cycles/s
+  won 0 of 400 clears against the pre-fix hook on this machine (WSL2/ext4). The gap is
+  microseconds wide and the retry budget is unbounded in principle; the fix costs one
+  syscall, so it went in on the structure of the code path rather than on a
+  reproduction. The open also carries `O_NONBLOCK`, for the other thing that fits in
+  that window and fails differently: `O_NOFOLLOW` says nothing about a FIFO, and
+  opening the read end of one with no writer blocks — measured, the open hung until
+  the process was killed at 8s and returned in 0ms with the flag set. That one is
+  availability, not forgery, and it reaches further, because `sweep()` runs on every
+  session start rather than only on a `/clear`. Both flags are POSIX — Node reports
+  them undefined on Windows, where this degrades to the old behaviour, the same
+  platform where ctime is not a guarantee either.
+  **Scope of that, narrower than the code looks:** "cannot be forged" means "not by any
+  call that operates on the file", not absolutely — whoever serves the filesystem under
+  `armed.d/` (a FUSE mount) or sets the system clock can state any ctime, both strictly
+  stronger primitives than writing an arm flag and so inside this entry's own threat
+  bound. ctime is also a POSIX property. Windows
+  has no equivalent — libuv reports NTFS's ChangeTime, which the native API *can* set
+  — so there this is ordering by write time rather than a guarantee about it, and it is
+  untested on that platform. Ordering is also not a defence standing alone: losing the
+  sort costs an attacker one cycle, since the flag stays on disk and is a candidate
+  again at the next `/clear`. Group 23 asserts that too rather than leaving it implied.
+  **What remains is the injection, and no check available to this hook reaches it.**
+  Four shapes were weighed against this section's own threat model — an attacker
+  running as the same uid with write access under `~/.claude`. A MAC over the flag
+  needs a key stored where that attacker can read it. Ownership and mode are identical
+  because the uid is identical. Binding to the arming session is impossible for the
+  reason `arm.sh` already documents: `/clear` mints a new session id and the
+  SessionStart payload carries no link back to the pre-clear one. A content digest in
+  the flag is written by whoever writes the flag. The digest is the only one with any
+  residue — it would bind the restored bytes to the arm on a *gstack* install
+  specifically, where the checkpoint sits under `~/.gstack` and the flag under
+  `~/.claude`, so write access to one tree is not write access to the other. Not taken
+  here: an absent field is the downgrade, requiring the field strands arms in flight
+  across an upgrade, and it buys a sha256 with a four-way portability fallback in shell
+  for a gain confined to one install shape. Recorded as the only live idea, not as work
+  queued. (2026-08-07)
 
 - **`arm.sh` does not check the checkpoint root at arm time.** The hook refuses an
   out-of-root `checkpoint` on restore; `arm.sh` will still happily write the flag. So a
@@ -273,6 +378,25 @@
   exactly that walk, but only when the raw and canonical forms differ — so the cost
   objection above still stands for the common path, and this item is unchanged.
   (concurrency fix, 2026-08-05)
+  **Update: "still matches" holds only where the path does not canonicalize, and that
+  split is red in CI.** When the raw and resolved forms of the clearing cwd differ, the
+  aliasing guard's divergence branch runs, finds the nested repo above the raw path, and
+  refuses it under the second condition — the nested repo sits strictly inside the armed
+  project. So the *same directory*, reached the *same direct way*, matches on one machine
+  and is refused on another, decided by nothing but whether some ancestor of it happens
+  to be a symlink. macOS is the always-diverging case (`/var/folders/…` →
+  `/private/var/folders/…`), which is why `macos-latest` has failed group 19b's last
+  assertion since it landed, on this branch and on `main`. Not macOS-specific in
+  mechanism: reproduced on Linux by pointing `TMPDIR` at a symlink — one failing
+  assertion, same name, 186/1/0. The entry above says the direct and symlinked routes
+  disagree deliberately; what is actually true is that two *path forms of the direct
+  route* disagree, which nobody chose. Resolving it is a design call rather than a fix,
+  and both directions cost something this file already argues against: closing the gap
+  everywhere means the per-ancestor stat on every session start that the paragraph above
+  defers, and dropping the second condition reopens exactly what the review of the
+  nested-scope change caught. Left failing rather than made green against the laxer
+  verdict — a green assertion here would say the behaviour is uniform, and it is not.
+  (CI triage, 2026-08-07)
 - **Two armed sessions in one project can mis-pair on out-of-order clears.** The
   hook consumes the oldest fresh arm matching the project; nothing in the
   `SessionStart` payload identifies which session is clearing, so it cannot do
