@@ -171,8 +171,9 @@ project the hook takes the oldest, and "oldest" is now the inode's change time r
 than the `armed_at` the flag writes about itself, so a forgery cannot claim to predate
 a real arm. That holds only because an `armed.d` entry that is not a regular file is
 refused outright — a symlink there would report its *target's* change time, which is
-whenever the attacker last touched a file they staged elsewhere. A stray entry is
-reported in the banner rather than skipped in silence.
+whenever the attacker last touched a file they staged elsewhere. Each flag is opened
+once with `O_NOFOLLOW`, so what gets checked and what gets read are the same inode. A
+stray entry is reported in the banner rather than skipped in silence.
 
 Two limits on that, both pinned by tests rather than described: it still fires if
 there is no real arm to lose to, and a flag planted *before* one genuinely is older.

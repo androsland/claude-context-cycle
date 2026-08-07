@@ -126,7 +126,15 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   refused and does not need to be: it is a regular file, and `link()` is a metadata
   write that moves the inode's ctime forward, which group 24 asserts rather than
   assumes. Six assertions in a new group 24, five of which fail against the
-  ordering-only hook.
+  ordering-only hook. **The `lstat` on its own was still a check-then-use**, and that
+  went too: classifying by path and then reading by path left a window to swap the
+  entry through, so every candidate is now opened once with `O_NOFOLLOW` and the
+  regular-file check, the sort key and the content all come off that one descriptor.
+  The window was *not* demonstrated — a toggle loop at ~700 cycles/s won 0 of 400
+  clears against the pre-fix hook — and it went in on the shape of the code path
+  rather than on a reproduction, because it costs one syscall. `O_NOFOLLOW` is POSIX;
+  Node reports it undefined on Windows, the same platform where ctime is not a
+  guarantee either.
   The staleness disclosure was re-coupled to the same clock in the same pass: it read
   `armed_at` while ordering read ctime, so a flag stamped `now` read as fresh however
   long it had sat there. Age is now the *older* of the two, which also fixes an honest

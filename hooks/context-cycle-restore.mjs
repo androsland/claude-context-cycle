@@ -25,7 +25,8 @@
 // Only arm flags are ever deleted here. Checkpoint files are append-only: this
 // hook never writes, moves, or removes one.
 
-import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync, unlinkSync, writeSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync, realpathSync, existsSync, unlinkSync, writeSync,
+         openSync, closeSync, fstatSync, constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, delimiter, isAbsolute, normalize } from 'node:path';
 
@@ -155,21 +156,26 @@ function armDirUsable() { return realDir(stateDir) && realDir(armDir); }
 // single-slot armed.json if one is still lying around. Split into the ones that are
 // REGULAR FILES and the ones that are not, because a link here is not a flag.
 //
-// Both readFileSync (content) and statSync (the ordering key, see armOrder) follow a
-// symlink and report the TARGET. So a symlinked entry grafts a fresh directory entry
-// onto an inode the attacker touched at a time of their choosing, which is exactly
-// the forgery armOrder() exists to stop — and it needs no race and no backdating.
-// Reproduced against this hook: a flag staged outside armed.d and left alone, then
-// symlinked into armed.d two seconds AFTER a legitimate arm, still sorted first and
-// restored the attacker's checkpoint. The link's OWN lstat ctime was correct; nothing
-// was reading it. A hardlink is not the same problem — link() is a metadata write and
-// moves the inode's ctime forward, measured alongside.
+// A path-based read of either the content or the ctime follows a symlink and reports
+// the TARGET. So a symlinked entry grafts a fresh directory entry onto an inode the
+// attacker touched at a time of their choosing, which is exactly the forgery the ctime
+// ordering exists to stop — and it needs no race and no backdating. Reproduced against
+// this hook: a flag staged outside armed.d and left alone, then symlinked into armed.d
+// two seconds AFTER a legitimate arm, still sorted first and restored the attacker's
+// checkpoint. The link's OWN lstat ctime was correct; nothing was reading it. A
+// hardlink is not the same problem — link() is a metadata write and moves the inode's
+// ctime forward, measured alongside.
 //
 // Refusing outright rather than ordering by the link's own ctime: `arm.sh` writes
 // through mktemp + rename and has never produced anything but a regular file, the
 // legacy writer likewise, and this file already refuses a symlinked `context-cycle/`
 // or `armed.d/` on the same reasoning one level up (see realDir). Nothing legitimate
 // makes an arm flag a link.
+//
+// What this lstat is NOT is the thing that makes the read safe — openArm's O_NOFOLLOW
+// is. Classifying by path here and reading by path later left a window an attacker
+// could swap the entry through. This stays because it is what makes a non-flag entry
+// REPORTABLE, and what keeps the sweep from ever considering one.
 //
 // A refused entry is left on disk, never unlinked. unlinkSync on a symlink would only
 // remove the link, so deleting would be safe — but this hook does not delete what it
@@ -199,12 +205,66 @@ function scanArms() {
 }
 function armPaths() { return scanArms().arms; }
 
-function readArm(p) {
+// Everything a caller needs to know about one arm flag, answered off a SINGLE open
+// file description: is it a regular file, when was its inode last changed (the sort
+// key), when was its content last written (the litter clock), and what does it say.
+//
+// It is one call because the alternative was a TOCTOU. scanArms() classifies by path
+// with lstat; a separate readFileSync(path) and statSync(path) afterwards each resolve
+// the NAME again, and both follow symlinks. A same-uid attacker who can write armed.d
+// — the threat model this whole area is written against — can leave a regular file
+// there long enough to be classified, then unlink-and-symlink it at a pre-staged file
+// with an old ctime and content of their choosing. One miss costs nothing and armed.d
+// is rescanned on every /clear, so the window is narrow but the retry budget is not.
+// That reopens exactly the forgery the lstat refusal was added to close.
+//
+// O_NOFOLLOW makes the open itself the check: it fails with ELOOP on a symlink, so
+// there is no window between deciding and reading. fstat then reports the inode
+// actually open, not whatever the name resolves to a moment later, and the content
+// comes from the same descriptor. scanArms()'s lstat stays — it is what makes a
+// non-flag entry REPORTABLE (see linkNote), and it keeps the sweep from ever
+// considering one — but it is no longer what makes the read safe.
+//
+// Scope, since O_NOFOLLOW is POSIX: Node exposes it as undefined on Windows, where
+// this degrades to `| 0` and the open follows a reparse point as it always did. That
+// is the same platform where ctime is not the guarantee the ORDERING note describes, and for
+// the same reason — stated here rather than left for someone to infer.
+//
+// Return shapes, deliberately three rather than a null and a guess:
+//   null                     — nothing usable at that path: gone (a concurrent hook
+//                              consumed it, which is ordinary), unreadable, or not a
+//                              regular file. Not an anomaly; not reported.
+//   { linked: true }         — it WAS a regular file when scanArms() looked and is a
+//                              symlink now. That is the swap above, and it is worth
+//                              saying out loud, so it joins the same banner as an
+//                              entry that was a link all along.
+//   { arm, order, mtimeMs }  — opened. `arm` is null when the JSON did not parse,
+//                              which sweep() treats as litter rather than as a flag.
+const O_NOFOLLOW = constants.O_NOFOLLOW || 0;
+function openArm(p) {
+  let fd;
   try {
-    const o = JSON.parse(readFileSync(p, 'utf8'));
-    if (o && typeof o === 'object') return o;
-  } catch { /* unreadable, malformed, or mid-write */ }
-  return null;
+    fd = openSync(p, constants.O_RDONLY | O_NOFOLLOW);
+  } catch (e) {
+    return e && e.code === 'ELOOP' ? { linked: true } : null;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return null;
+    let arm = null;
+    try {
+      const o = JSON.parse(readFileSync(fd, 'utf8'));
+      if (o && typeof o === 'object') arm = o;
+    } catch { /* unreadable, malformed, or mid-write */ }
+    // Unreadable ctime => Infinity, so it sorts LAST. See the ORDERING note: falling
+    // back to a field the flag supplied would hand the hole straight back.
+    const order = Number.isFinite(st.ctimeMs) && st.ctimeMs > 0 ? st.ctimeMs : Infinity;
+    return { arm, order, mtimeMs: st.mtimeMs };
+  } catch {
+    return null;
+  } finally {
+    try { closeSync(fd); } catch { /* ignore */ }
+  }
 }
 
 // Live = parses, carries a usable armed_at, and — only when the user opted into a
@@ -221,7 +281,7 @@ function readArm(p) {
 // It must also be POSITIVE, which is now purely a shape check: `date +%s` cannot
 // produce it, so a flag that carries it was hand-written. It used to be load-bearing
 // against a planted flag stamped 0 winning the ascending sort outright; ordering has
-// since moved off this field entirely (see armOrder), which closed that properly —
+// since moved off this field entirely (see ORDERING below), which closed that properly —
 // a forgery only had to say `1` to get past a check on the sign.
 //
 // Accepted cost, because this is not quite "no honest flag can look like that": a
@@ -233,7 +293,7 @@ function readArm(p) {
 // firing a planted one, which is the correct direction for a hook that injects into
 // model context.
 //
-// What is left of the flag's trust problem after this and armOrder() is the flag
+// What is left of the flag's trust problem after this and the ctime ordering is the flag
 // itself: nothing here authenticates who wrote one (TODOS.md, "an arm flag on disk is
 // trusted wholesale").
 function isLive(arm, now) {
@@ -244,8 +304,10 @@ function isLive(arm, now) {
   return age <= ARM_TTL_SECONDS && age > -ARM_TTL_SECONDS;
 }
 
-// Sort key for concurrent arms — and the only piece of arm metadata that does NOT
-// come out of the flag's own JSON.
+// ORDERING. Why `order` above is the inode's change time — the only piece of arm
+// metadata that does NOT come out of the flag's own JSON. Kept as prose next to
+// isLive() rather than folded into openArm(), which is now where it is computed,
+// because it is the argument for the whole design and not a note about one expression.
 //
 // The sort used to run on `armed_at`. That field is written by whoever wrote the
 // flag, so a planted one carrying a small timestamp sorted ahead of every legitimate
@@ -277,11 +339,14 @@ function isLive(arm, now) {
 // the same millisecond) fall through to the path comparison at the call site, which
 // is deterministic and reads nothing from the flag either.
 //
-// This is only sound because scanArms() has already refused anything that is not a
-// regular file. statSync FOLLOWS a symlink, so on a linked entry it would report the
-// TARGET's ctime and the whole guarantee evaporates — an attacker stages a file, never
-// touches it again, and links it in whenever they like. Reproduced against an earlier
-// version of this function that had the refusal missing. The two belong together.
+// This is only sound because it reads ctime off an O_NOFOLLOW descriptor rather than
+// off a path (openArm). A path-based statSync FOLLOWS a symlink, so on a linked entry
+// it reports the TARGET's ctime and the whole guarantee evaporates — an attacker
+// stages a file, never touches it again, and links it in whenever they like.
+// Reproduced twice against earlier versions of this file: once when there was no
+// refusal at all, and once when the refusal was an lstat in scanArms() that a swap
+// between the classify and the read could step around. Ordering and the descriptor
+// belong together; neither is sufficient alone.
 //
 // Scope, stated because it is narrower than the code looks. "Cannot be forged" means
 // "not by any call that operates on the file"; it is not absolute. Whoever serves the
@@ -289,15 +354,8 @@ function isLive(arm, now) {
 // ctime they like — both strictly stronger primitives than writing an arm flag, and so
 // inside the same threat-model bound as the rest of this file. And it is a POSIX
 // property: Windows has no ctime in that sense — libuv reports NTFS's ChangeTime,
-// which the native API CAN set — so there this orders by write time without
-// guaranteeing it. Untested on that platform.
-function armOrder(p) {
-  try {
-    const t = statSync(p).ctimeMs;
-    if (Number.isFinite(t) && t > 0) return t;
-  } catch { /* stat failed: sort last, never first */ }
-  return Infinity;
-}
+// which the native API CAN set, and O_NOFOLLOW does not exist there either — so on
+// that platform this orders by write time without guaranteeing it. Untested there.
 
 function drop(p) { try { unlinkSync(p); } catch { /* ignore */ } }
 
@@ -310,14 +368,19 @@ function drop(p) { try { unlinkSync(p); } catch { /* ignore */ } }
 // for a /clear in its own project, and there is no deadline on that.
 function sweep(now) {
   for (const p of armPaths()) {
-    const arm = readArm(p);
-    if (arm === null) {
+    const a = openArm(p);
+    // Not a flag right now — gone, unreadable, or swapped for a link since the scan.
+    // Reaping is a delete, so it declines on anything it could not positively identify.
+    if (!a || a.linked) continue;
+    if (a.arm === null) {
       // Unparseable. Could be a concurrent arm.sh mid-write, so only reap it once
-      // it is past the litter horizon — a live arm must never be destroyed.
-      try { if (now - statSync(p).mtimeMs / 1000 > LITTER_TTL_SECONDS) drop(p); } catch { /* ignore */ }
+      // it is past the litter horizon — a live arm must never be destroyed. mtime
+      // comes off the same descriptor the content did, so a swap cannot make this
+      // stat a different inode than the one that failed to parse.
+      if (now - a.mtimeMs / 1000 > LITTER_TTL_SECONDS) drop(p);
       continue;
     }
-    if (!isLive(arm, now)) drop(p);
+    if (!isLive(a.arm, now)) drop(p);
   }
   if (!armDirUsable()) return;
   try {
@@ -682,15 +745,20 @@ const { arms: armFiles, odd: oddArms } = scanArms();
 const refused = [];
 const candidates = [];
 for (const p of armFiles) {
-  const arm = readArm(p);
-  if (!isLive(arm, now)) continue;
-  if (!scopeAllows(arm.cwd, payload.cwd)) continue;        // wrong project -> leave armed
-  candidates.push({ path: p, arm, order: armOrder(p) });
+  const a = openArm(p);
+  // Classified as a regular file a moment ago, a symlink by the time it was opened.
+  // Nothing legitimate does that, so it goes in the same banner as one that was a
+  // link when scanArms() looked. `!a` alone does not: a flag that simply vanished is
+  // an ordinary race between two sessions clearing at once, not an anomaly.
+  if (a && a.linked) { oddArms.push(p); continue; }
+  if (!a || !isLive(a.arm, now)) continue;
+  if (!scopeAllows(a.arm.cwd, payload.cwd)) continue;      // wrong project -> leave armed
+  candidates.push({ path: p, arm: a.arm, order: a.order });
 }
 if (!candidates.length) { warn(); noop(); }
 
 // Oldest first, by the inode's change time rather than the flag's own `armed_at` —
-// see armOrder(). When two sessions in one project clear in the order they armed,
+// see the ORDERING note above. When two sessions in one project clear in the order they armed,
 // each gets its own checkpoint back. (Out-of-order clears can still mis-pair —
 // nothing in the payload says which session is clearing. See SKILL.md.)
 //
@@ -824,7 +892,7 @@ const STALE_AFTER = 4 * 3600;
 // - `armed_at` is written by whoever wrote the flag, so on its own it can under-report
 //   — a flag stamped `now` reads as fresh however long it has sat there, and this
 //   disclosure is the only thing telling the model to re-check a stale plan. Since
-//   ordering moved to the inode's change time (armOrder), the two were decoupled:
+//   ordering moved to the inode's change time (see ORDERING), the two were decoupled:
 //   the hook was sorting on one clock and reporting on another. This re-couples them.
 // - It also fixes an honest case with no attacker in it. A flag whose `armed_at` is
 //   wrong because the machine's clock was wrong when it was written — suspend/resume,

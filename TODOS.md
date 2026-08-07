@@ -22,6 +22,16 @@
   but a `uname` branch built on the same assumption would have skipped a group that
   works, silently. Worth remembering when the temptation is to hard-code a platform
   rather than ask it. (CI work, 2026-08-05; 14b claim corrected 2026-08-06)
+- **The arm-flag TOCTOU has no in-suite discriminator.** Group 24 covers the outer
+  layer — an `armed.d` entry that is a symlink when the hook looks is refused and
+  reported — and those five assertions do fail against the hook without it. The inner
+  layer, `openArm()`'s `O_NOFOLLOW`, only matters when the entry *changes type between*
+  the scan and the read, and a test for it has to win a race the attacker also has to
+  win. A bounded toggle loop is not a discriminator: at ~700 cycles/s it won 0 of 400
+  clears against the *vulnerable* hook, so a green run would prove nothing and would
+  read as coverage. Widening the window means editing the hook, which tests something
+  other than what ships. Left uncovered deliberately; the reasoning is the test.
+  (security review follow-up, 2026-08-07)
 - **Half of the staleness reconciliation is untestable in the suite.** The restore
   banner now reports the *older* of the flag's own `armed_at` and the inode's change
   time, so a flag stamped `now` can no longer read as fresh however long it has sat on
@@ -136,6 +146,22 @@
   ctime forward — which group 24 asserts rather than assumes. Six assertions in group
   24, five of which fail against the ordering-only hook. Found by the security reviewer
   on this branch's own diff and reproduced independently before acting on it.
+  **And the `lstat` refusal on its own was still a check-then-use.** `scanArms()`
+  classified by path; `readFileSync(path)` and `statSync(path)` afterwards each
+  resolved the name again, and both follow symlinks — so an attacker who leaves a
+  regular file in `armed.d/` long enough to be classified, then swaps it for a symlink
+  at a pre-staged old-ctime file, is back to the same forgery. Every candidate is now
+  opened once with `O_NOFOLLOW` (`openArm()`), and the regular-file check, the sort key
+  and the content all come off that one descriptor; the `lstat` stays only because it
+  is what makes a non-flag entry *reportable* and keeps the sweep from considering one.
+  **The window was not demonstrated, and that is stated rather than glossed:** a
+  toggle loop swapping the entry between a regular file and a symlink at ~700 cycles/s
+  won 0 of 400 clears against the pre-fix hook on this machine (WSL2/ext4). The gap is
+  microseconds wide and the retry budget is unbounded in principle; the fix costs one
+  syscall, so it went in on the structure of the code path rather than on a
+  reproduction. `O_NOFOLLOW` is POSIX — Node reports it undefined on Windows, where
+  this degrades to the old behaviour, the same platform where ctime is not a guarantee
+  either.
   **Scope of that, narrower than the code looks:** "cannot be forged" means "not by any
   call that operates on the file", not absolutely — whoever serves the filesystem under
   `armed.d/` (a FUSE mount) or sets the system clock can state any ctime, both strictly
