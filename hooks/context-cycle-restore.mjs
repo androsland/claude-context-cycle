@@ -183,9 +183,6 @@ function armDirUsable() { return realDir(stateDir) && realDir(armDir); }
 // reported (see the banner) rather than silent, because a silent non-restore on a
 // setup that works is the failure this project keeps finding, and someone whose
 // dotfile manager symlinks individual files would otherwise get nothing and no reason.
-function realFile(p) {
-  try { return lstatSync(p).isFile(); } catch { return false; }
-}
 function scanArms() {
   const arms = [], odd = [];
   if (!stateDirUsable()) return { arms, odd };
