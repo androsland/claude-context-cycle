@@ -159,9 +159,14 @@
   won 0 of 400 clears against the pre-fix hook on this machine (WSL2/ext4). The gap is
   microseconds wide and the retry budget is unbounded in principle; the fix costs one
   syscall, so it went in on the structure of the code path rather than on a
-  reproduction. `O_NOFOLLOW` is POSIX — Node reports it undefined on Windows, where
-  this degrades to the old behaviour, the same platform where ctime is not a guarantee
-  either.
+  reproduction. The open also carries `O_NONBLOCK`, for the other thing that fits in
+  that window and fails differently: `O_NOFOLLOW` says nothing about a FIFO, and
+  opening the read end of one with no writer blocks — measured, the open hung until
+  the process was killed at 8s and returned in 0ms with the flag set. That one is
+  availability, not forgery, and it reaches further, because `sweep()` runs on every
+  session start rather than only on a `/clear`. Both flags are POSIX — Node reports
+  them undefined on Windows, where this degrades to the old behaviour, the same
+  platform where ctime is not a guarantee either.
   **Scope of that, narrower than the code looks:** "cannot be forged" means "not by any
   call that operates on the file", not absolutely — whoever serves the filesystem under
   `armed.d/` (a FUSE mount) or sets the system clock can state any ctime, both strictly

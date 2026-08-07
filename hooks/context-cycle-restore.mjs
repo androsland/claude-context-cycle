@@ -225,7 +225,17 @@ function armPaths() { return scanArms().arms; }
 // non-flag entry REPORTABLE (see linkNote), and it keeps the sweep from ever
 // considering one — but it is no longer what makes the read safe.
 //
-// Scope, since O_NOFOLLOW is POSIX: Node exposes it as undefined on Windows, where
+// O_NONBLOCK is there for the OTHER thing an attacker can put in that window, and it
+// is an availability bug rather than a forgery: O_NOFOLLOW refuses a symlink but says
+// nothing about a FIFO, and opening the read end of one with no writer BLOCKS. Not a
+// guess — measured: the open hung until the process was killed at 8s, and returned in
+// 0ms with the flag set, reporting isFIFO so the isFile() check below discards it.
+// The reach is wider than the sort: sweep() runs on every session start, not only on
+// a /clear, so a hung open there stalls session startup until the hook timeout. It
+// needs the same scan→open race as the symlink swap, since a FIFO sitting there
+// statically never gets past scanArms()'s lstat. One flag, so it goes in.
+//
+// Scope, since both flags are POSIX: Node exposes them as undefined on Windows, where
 // this degrades to `| 0` and the open follows a reparse point as it always did. That
 // is the same platform where ctime is not the guarantee the ORDERING note describes, and for
 // the same reason — stated here rather than left for someone to infer.
@@ -241,10 +251,11 @@ function armPaths() { return scanArms().arms; }
 //   { arm, order, mtimeMs }  — opened. `arm` is null when the JSON did not parse,
 //                              which sweep() treats as litter rather than as a flag.
 const O_NOFOLLOW = constants.O_NOFOLLOW || 0;
+const O_NONBLOCK = constants.O_NONBLOCK || 0;
 function openArm(p) {
   let fd;
   try {
-    fd = openSync(p, constants.O_RDONLY | O_NOFOLLOW);
+    fd = openSync(p, constants.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   } catch (e) {
     return e && e.code === 'ELOOP' ? { linked: true } : null;
   }

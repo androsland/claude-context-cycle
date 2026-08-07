@@ -132,8 +132,13 @@ Arms wait for you. Plus CI, and an installer that no longer eats your local edit
   regular-file check, the sort key and the content all come off that one descriptor.
   The window was *not* demonstrated — a toggle loop at ~700 cycles/s won 0 of 400
   clears against the pre-fix hook — and it went in on the shape of the code path
-  rather than on a reproduction, because it costs one syscall. `O_NOFOLLOW` is POSIX;
-  Node reports it undefined on Windows, the same platform where ctime is not a
+  rather than on a reproduction, because it costs one syscall. The open also carries
+  `O_NONBLOCK`, which is not about forgery at all: `O_NOFOLLOW` says nothing about a
+  FIFO, and opening the read end of one with no writer *blocks* — measured, the open
+  hung until the process was killed at 8s and returned in 0ms with the flag set. The
+  sweep runs on every session start, not only on a `/clear`, so that would have stalled
+  startup rather than mis-sorted a restore. Both flags are POSIX;
+  Node reports them undefined on Windows, the same platform where ctime is not a
   guarantee either.
   The staleness disclosure was re-coupled to the same clock in the same pass: it read
   `armed_at` while ordering read ctime, so a flag stamped `now` read as fresh however

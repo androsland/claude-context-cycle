@@ -1233,6 +1233,30 @@ else
   skip "24 (hardlinked armed.d entry)" "this filesystem cannot create hardlinks"
 fi
 
+# A FIFO is the other thing that can sit on a flag path, and it fails differently:
+# O_NOFOLLOW says nothing about one, and opening the read end with no writer BLOCKS.
+# The lstat in scanArms() is what keeps a statically planted one from ever reaching
+# the open, so this asserts the outer layer holds AND that the hook returns at all —
+# a regression that dropped the lstat and relied on O_NOFOLLOW alone would hang
+# session startup, not merely mis-sort. Wrapped in `timeout` so that regression shows
+# up as one red assertion instead of a suite that never finishes.
+if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  rm -f "$ARMD"/*.json
+  arm23 s24c "$C23L"
+  if mkfifo "$ARMD/zz-fifo.json" 2>/dev/null; then
+    B24F="$(timeout 20 node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1],session_id:"post-clear-new-uuid"}))' "$(winp "$P23")" | timeout 20 node "$HOOK" | jsonf banner)"
+    eq "a FIFO on a flag path does not hang the hook, and the arm still restores" \
+       '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$B24F")"
+    eq "and the FIFO is reported like any other non-regular entry" "warned" "$(odd_note "$B24F")"
+    rm -f "$ARMD/zz-fifo.json"
+  else
+    skip "24 (FIFO on a flag path)" "mkfifo refused inside the state dir"
+  fi
+  rm -f "$ARMD"/*.json
+else
+  skip "24 (FIFO on a flag path)" "mkfifo or timeout is unavailable"
+fi
+
 echo
 printf '=== %d passed, %d failed, %d skipped ===\n' "$PASS" "$FAIL" "$SKIP"
 [ "$SKIP" -eq 0 ] || printf 'skipped on this platform (%s):%s\n' "$(uname -s 2>/dev/null || echo unknown)" "$SKIPPED"
