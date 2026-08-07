@@ -11,8 +11,12 @@ SKILL_DIR="$CLAUDE_DIR/skills/context-cycle"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS="$CLAUDE_DIR/settings.json"
 
-# Where this script lives (empty when piped through `curl | bash`).
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+# Where this script lives (empty when piped through `curl | bash`). The fallback is
+# on the assignment rather than inside the substitution: `cd ... && pwd || true` is
+# the A && B || C shape shellcheck flags (SC2015), and there it is not merely style —
+# a `pwd` that failed would be swallowed by the `true` and leave SELF_DIR empty with
+# no way to tell that apart from the curl case. This way only a failed `cd` clears it.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || SELF_DIR=""
 
 say()  { printf '  %s\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }

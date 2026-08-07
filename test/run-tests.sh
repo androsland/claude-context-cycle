@@ -22,7 +22,10 @@ command -v git  >/dev/null 2>&1 || { echo "git is required"  >&2; exit 2; }
 # path /cfg — harmless as a normal user, but this suite writes and deletes files,
 # and CI containers run as root.
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/context-cycle-test.XXXXXX")" || ROOT=""
-[ -n "$ROOT" ] && [ -d "$ROOT" ] || { echo "mktemp -d failed; refusing to run" >&2; exit 2; }
+if [ -z "$ROOT" ] || [ ! -d "$ROOT" ]; then
+  echo "mktemp -d failed; refusing to run" >&2
+  exit 2
+fi
 trap 'rm -rf "$ROOT"' EXIT
 
 # Path form for anything handed to node or written into an arm flag. The restore
@@ -985,11 +988,19 @@ eq "an out-of-root checkpoint is armed but not restored" "refused" "$(refused_in
 # project keeps finding: the /clear looks ordinary and the context never comes back.
 REFUSE22=$(node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
    "$(winp "$P22")" | node "$HOOK")
+# Every `case` inside a `$( )` here writes its patterns in the optional-leading-paren
+# form, `(pat)` rather than `pat)`, and that is load-bearing rather than a style: bash
+# 3.2 — which is /bin/bash on macOS, and what the macos-latest job runs — scans a `$( )`
+# for the matching paren instead of parsing it, so a case pattern's own `)` ends the
+# substitution early. The tail then reaches the shell as a bare command and the
+# assertion compares against `   echo 1;; *) echo 0;; esac)`. It failed loudly on macOS
+# (five assertions, plus five `syntax error near unexpected token` lines) while Linux
+# and Git Bash — bash 5 — were green, so a local run cannot see it.
 eq "and the user is told why, with the escape hatch named" "1" \
-   "$(case "$REFUSE22" in *"outside the known"*CONTEXT_CYCLE_CHECKPOINT_ROOTS*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REFUSE22" in (*"outside the known"*CONTEXT_CYCLE_CHECKPOINT_ROOTS*) echo 1;; (*) echo 0;; esac)"
 eq "the refused arm is NOT consumed" "1" "$(arms)"
 eq "and nothing was injected into model context" "0" \
-   "$(case "$REFUSE22" in *additionalContext*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REFUSE22" in (*additionalContext*) echo 1;; (*) echo 0;; esac)"
 # Recoverability end-to-end: the same arm, still on disk, restores once the root is
 # declared. This is why a refusal must not drop the flag — a mis-derived root would
 # otherwise destroy a legitimate pending restore instead of merely delaying it.
@@ -1024,7 +1035,7 @@ EOF
 REL22=$( cd "$P22" && node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1]}))' \
    "$(winp "$P22")" | node "$HOOK" )
 eq "a relative checkpoint path is refused even when it resolves" "1" \
-   "$(case "$REL22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+   "$(case "$REL22" in (*"outside the known"*) echo 1;; (*) echo 0;; esac)"
 eq "...and it stays armed like any other refusal" "1" "$(arms)"
 rm -f "$ARMD"/*.json "$P22/relnotes.md"
 
@@ -1057,9 +1068,9 @@ C22OK="$CPD/p22-ok.md"; mkcp "$C22OK" "LEGIT"
 arm22 s22x "$C22"; sleep 1; arm22 s22y "$C22OK"
 BOTH22=$(clear_in "$P22")
 eq "a refused arm does not block a good one behind it" "1" \
-   "$(case "$BOTH22" in '✓ Restored: "LEGIT"'*) echo 1;; *) echo 0;; esac)"
+   "$(case "$BOTH22" in ('✓ Restored: "LEGIT"'*) echo 1;; (*) echo 0;; esac)"
 eq "...and the successful banner still reports the refusal" "1" \
-   "$(case "$BOTH22" in *"outside the known"*) echo 1;; *) echo 0;; esac)"
+   "$(case "$BOTH22" in (*"outside the known"*) echo 1;; (*) echo 0;; esac)"
 eq "the refused arm is still armed after that restore" "1" "$(arms)"
 rm -f "$ARMD"/*.json
 
@@ -1248,14 +1259,27 @@ fi
 if command -v mkfifo >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   rm -f "$ARMD"/*.json
   arm23 s24c "$C23L"
-  if mkfifo "$ARMD/zz-fifo.json" 2>/dev/null; then
+  if ! mkfifo "$ARMD/zz-fifo.json" 2>/dev/null; then
+    skip "24 (FIFO on a flag path)" "mkfifo refused inside the state dir"
+  elif [ "$(node -e 'let r="no";try{r=require("fs").lstatSync(process.argv[1]).isFIFO()?"yes":"no"}catch(e){}process.stdout.write(r)' "$(winp "$ARMD/zz-fifo.json")")" != "yes" ]; then
+    # `command -v mkfifo` is not the capability this group needs, which is why it was
+    # the wrong probe: under Git Bash MSYS emulates FIFOs, so mkfifo succeeds and the
+    # outer guard passes, but the native-Windows node that RUNS the hook lstats the
+    # result as an ordinary file. There is then no non-regular entry for scanArms() to
+    # refuse, the banner is correctly silent, and asserting "warned" measured MSYS
+    # rather than the hook — one red assertion on windows-latest and nothing wrong.
+    # Ask the runtime that does the work whether it sees a FIFO, the way group 14b's
+    # probe asks the filesystem, rather than branching on `uname` (TODOS.md records
+    # what that assumption cost there). Both assertions go together: with no FIFO in
+    # the hook's view, the non-hang half is not exercising a FIFO either.
+    rm -f "$ARMD/zz-fifo.json"
+    skip "24 (FIFO on a flag path)" "mkfifo ran, but node's lstat does not report a FIFO here"
+  else
     B24F="$(timeout 20 node -e 'process.stdout.write(JSON.stringify({source:"clear",cwd:process.argv[1],session_id:"post-clear-new-uuid"}))' "$(winp "$P23")" | timeout 20 node "$HOOK" | jsonf banner)"
     eq "a FIFO on a flag path does not hang the hook, and the arm still restores" \
        '✓ Restored: "LEGIT" · next: finish LEGIT (testbr)' "$(restored_line "$B24F")"
     eq "and the FIFO is reported like any other non-regular entry" "warned" "$(odd_note "$B24F")"
     rm -f "$ARMD/zz-fifo.json"
-  else
-    skip "24 (FIFO on a flag path)" "mkfifo refused inside the state dir"
   fi
   rm -f "$ARMD"/*.json
 else

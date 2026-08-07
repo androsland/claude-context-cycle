@@ -378,6 +378,25 @@
   exactly that walk, but only when the raw and canonical forms differ — so the cost
   objection above still stands for the common path, and this item is unchanged.
   (concurrency fix, 2026-08-05)
+  **Update: "still matches" holds only where the path does not canonicalize, and that
+  split is red in CI.** When the raw and resolved forms of the clearing cwd differ, the
+  aliasing guard's divergence branch runs, finds the nested repo above the raw path, and
+  refuses it under the second condition — the nested repo sits strictly inside the armed
+  project. So the *same directory*, reached the *same direct way*, matches on one machine
+  and is refused on another, decided by nothing but whether some ancestor of it happens
+  to be a symlink. macOS is the always-diverging case (`/var/folders/…` →
+  `/private/var/folders/…`), which is why `macos-latest` has failed group 19b's last
+  assertion since it landed, on this branch and on `main`. Not macOS-specific in
+  mechanism: reproduced on Linux by pointing `TMPDIR` at a symlink — one failing
+  assertion, same name, 186/1/0. The entry above says the direct and symlinked routes
+  disagree deliberately; what is actually true is that two *path forms of the direct
+  route* disagree, which nobody chose. Resolving it is a design call rather than a fix,
+  and both directions cost something this file already argues against: closing the gap
+  everywhere means the per-ancestor stat on every session start that the paragraph above
+  defers, and dropping the second condition reopens exactly what the review of the
+  nested-scope change caught. Left failing rather than made green against the laxer
+  verdict — a green assertion here would say the behaviour is uniform, and it is not.
+  (CI triage, 2026-08-07)
 - **Two armed sessions in one project can mis-pair on out-of-order clears.** The
   hook consumes the oldest fresh arm matching the project; nothing in the
   `SessionStart` payload identifies which session is clearing, so it cannot do
