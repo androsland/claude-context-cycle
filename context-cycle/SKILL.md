@@ -1,6 +1,13 @@
 ---
 name: context-cycle
-description: Save the current working context, then clear the conversation and auto-restore that context into the fresh session — to reclaim the context window without losing your place. Saves a checkpoint, arms a one-shot SessionStart hook, and prompts you to press /clear; after the clear, the saved context is auto-injected into the new session. Only THIS skill arms the restore — a normal /clear does nothing. Triggers: context cycle, recycle context, save clear and restore, free up context, compact my context, reset context but keep my place.
+description: >-
+  Save the current working context, then clear the conversation and auto-restore
+  that context into the fresh session — to reclaim the context window without
+  losing your place. Saves a checkpoint, arms a one-shot SessionStart hook, and
+  prompts you to press /clear; after the clear, the saved context is auto-injected
+  into the new session. Only THIS skill arms the restore — a normal /clear does
+  nothing. Triggers: context cycle, recycle context, save clear and restore, free
+  up context, compact my context, reset context but keep my place.
 allowed-tools:
   - Bash
   - Read
